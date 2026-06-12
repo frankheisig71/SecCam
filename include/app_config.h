@@ -1,12 +1,11 @@
 #pragma once
-#include <app_secrets.h>
 
 // WiFi mode selection.
 #define APP_WIFI_MODE_AP 1
 #define APP_WIFI_MODE_STA 2
 // Select whether the device opens its own AP or joins an existing WLAN.
 #ifndef APP_WIFI_MODE
-#define APP_WIFI_MODE APP_WIFI_MODE_STA
+#define APP_WIFI_MODE APP_WIFI_MODE_AP
 #endif
 
 // Access point assumptions: the module opens its own AP so a browser can connect directly.
@@ -16,8 +15,8 @@
 #define APP_WIFI_AP_MAX_CLIENTS 4
 
 // Station assumptions: adjust these placeholders for the target infrastructure.
-//#define APP_WIFI_STA_SSID "MY_SSID" -> app_secrets.h
-//#define APP_WIFI_STA_PASSWORD "MY_KEY" -> app_secrets.h
+#define APP_WIFI_STA_SSID "HEISIG2"
+#define APP_WIFI_STA_PASSWORD "3869124067135153"
 
 // Capture cadence and image quality assumptions.
 // No periodic capture: new images are triggered only by PIR, HTTP, or startup.
@@ -43,10 +42,28 @@
 #define APP_DATASET_COLLECTOR_DEVICE_ID "goouuuu-cam"
 #endif
 #ifndef APP_DATASET_COLLECTOR_UPLOAD_URL
-#define APP_DATASET_COLLECTOR_UPLOAD_URL "http://192.168.1.2:8080/api/v1/captures"
+#define APP_DATASET_COLLECTOR_UPLOAD_URL "http://192.168.178.149:8080/api/v1/captures"
 #endif
 #ifndef APP_DATASET_COLLECTOR_UPLOAD_TIMEOUT_MS
 #define APP_DATASET_COLLECTOR_UPLOAD_TIMEOUT_MS 15000
+#endif
+#ifndef APP_DATASET_COLLECTOR_UPLOAD_QUEUE_DEPTH
+#define APP_DATASET_COLLECTOR_UPLOAD_QUEUE_DEPTH 5
+#endif
+#ifndef APP_DATASET_COLLECTOR_UPLOAD_QUEUE_TIMEOUT_MS
+#define APP_DATASET_COLLECTOR_UPLOAD_QUEUE_TIMEOUT_MS 1000
+#endif
+#ifndef APP_DATASET_COLLECTOR_UPLOAD_RETRY_COUNT
+#define APP_DATASET_COLLECTOR_UPLOAD_RETRY_COUNT 5
+#endif
+#ifndef APP_DATASET_COLLECTOR_UPLOAD_RETRY_DELAY_MS
+#define APP_DATASET_COLLECTOR_UPLOAD_RETRY_DELAY_MS (5 * 1000)
+#endif
+#ifndef APP_DATASET_COLLECTOR_UPLOAD_TASK_STACK_SIZE
+#define APP_DATASET_COLLECTOR_UPLOAD_TASK_STACK_SIZE 6144
+#endif
+#ifndef APP_DATASET_COLLECTOR_UPLOAD_TASK_PRIORITY
+#define APP_DATASET_COLLECTOR_UPLOAD_TASK_PRIORITY 4
 #endif
 #ifndef APP_DATASET_COLLECTOR_IDLE_INTERVAL_MS
 #define APP_DATASET_COLLECTOR_IDLE_INTERVAL_MS (15 * 60 * 1000)

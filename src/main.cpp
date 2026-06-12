@@ -420,7 +420,7 @@ esp_err_t configure_power_management() {
            APP_CPU_FREQ_ACTIVE_MHZ);
   return ESP_OK;
 }
-
+#if !APP_DATASET_COLLECTOR_ENABLED
 esp_err_t perform_capture(const char *reason, uint32_t capture_count, bool deliver_best_frame) {
   if (g_capture_mutex == nullptr || g_cpu_max_lock == nullptr) {
     return ESP_ERR_INVALID_STATE;
@@ -529,8 +529,9 @@ esp_err_t perform_capture(const char *reason, uint32_t capture_count, bool deliv
 
   return capture_err;
 }
+#endif
 
- #if APP_HTTP_SERVER_ENABLED
+#if APP_HTTP_SERVER_ENABLED
 esp_err_t capture_now_from_http() {
   if (are_triggers_suppressed()) {
     return ESP_ERR_INVALID_STATE;
@@ -678,6 +679,9 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(app_camera_init());
   ESP_ERROR_CHECK(app_person_detect_init());
   ESP_ERROR_CHECK(configure_power_management());
+#if APP_DATASET_COLLECTOR_ENABLED
+  ESP_ERROR_CHECK(app_capture_uploader_init());
+#endif
 #if APP_CAPTURE_ON_STARTUP
   ESP_ERROR_CHECK(perform_capture("startup", 1, false));
 #endif

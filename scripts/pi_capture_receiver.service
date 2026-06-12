@@ -1,0 +1,30 @@
+[Unit]
+Description=ESP32-S3-CAM capture receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+User=root
+Group=root
+
+WorkingDirectory=/opt/seccam
+ExecStart=/usr/bin/python3 /opt/seccam/pi_capture_receiver.py --config /etc/seccam-receiver.conf
+
+Restart=always
+RestartSec=2
+
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+StandardOutput=journal
+StandardError=journal
+
+PrivateTmp=true
+
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
