@@ -1,0 +1,13 @@
+Reading CMake configuration...
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 0 compatible libraries
+Scanning dependencies...
+No dependencies
+Building in release mode
+Archiving .pio\build\esp32-s3-cam-detect\esp-idf\espressif__esp32-camera\libespressif__esp32-camera.a
+Archiving .pio\build\esp32-s3-cam-detect\esp-idf\espressif__esp_jpeg\libespressif__esp_jpeg.a
+*** [.pio\build\esp32-s3-cam-detect\.pio\build\esp32-s3-cam-detect\pedestrian_detect.espdl.S.o] Source `.pio\build\esp32-s3-cam-detect\pedestrian_detect.espdl.S' not found, needed by target `.pio\build\esp32-s3-cam-detect\.pio\build\esp32-s3-cam-detect\pedestrian_detect.espdl.S.o'.
+Indexing .pio\build\esp32-s3-cam-detect\esp-idf\espressif__esp_jpeg\libespressif__esp_jpeg.a
+Indexing .pio\build\esp32-s3-cam-detect\esp-idf\espressif__esp32-camera\libespressif__esp32-camera.a
+=================================================== [FAILED] Took 6.71 seconds ====

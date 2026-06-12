@@ -1,0 +1,137 @@
+#pragma once
+#include <app_secrets.h>
+
+// WiFi mode selection.
+#define APP_WIFI_MODE_AP 1
+#define APP_WIFI_MODE_STA 2
+// Select whether the device opens its own AP or joins an existing WLAN.
+#ifndef APP_WIFI_MODE
+#define APP_WIFI_MODE APP_WIFI_MODE_STA
+#endif
+
+// Access point assumptions: the module opens its own AP so a browser can connect directly.
+#define APP_WIFI_AP_SSID "GooUuuu-CAM"
+#define APP_WIFI_AP_PASSWORD "goouuuu123"
+#define APP_WIFI_AP_CHANNEL 6
+#define APP_WIFI_AP_MAX_CLIENTS 4
+
+// Station assumptions: adjust these placeholders for the target infrastructure.
+//#define APP_WIFI_STA_SSID "MY_SSID" -> app_secrets.h
+//#define APP_WIFI_STA_PASSWORD "MY_KEY" -> app_secrets.h
+
+// Capture cadence and image quality assumptions.
+// No periodic capture: new images are triggered only by PIR, HTTP, or startup.
+// External trigger input; a LOW-to-HIGH edge requests a new capture.
+#define APP_CAPTURE_TRIGGER_GPIO GPIO_NUM_21
+#define APP_STATUS_LED_GPIO GPIO_NUM_48
+#define APP_STATUS_LED_PIXEL_COUNT 1
+#define APP_STATUS_LED_BRIGHTNESS 16
+// Shared debounce/cooldown window for GPIO and manual triggers.
+#define APP_CAPTURE_TRIGGER_COOLDOWN_MS (5 * 1000)
+#define APP_CAPTURE_TRIGGER_EXTRA_FRAMES 2
+#define APP_CAPTURE_TRIGGER_ANALYZE_FRAMES 3
+#define APP_CAPTURE_TRIGGER_SUPPRESSION_MS (10 * 1000)
+#define APP_CAPTURE_REFERENCE_REFRESH_MS (60 * 1000)
+#define APP_CAPTURE_REFERENCE_IDLE_MS (10 * 1000)
+#ifndef APP_HTTP_SERVER_ENABLED
+#define APP_HTTP_SERVER_ENABLED 1
+#endif
+#ifndef APP_DATASET_COLLECTOR_ENABLED
+#define APP_DATASET_COLLECTOR_ENABLED 0
+#endif
+#ifndef APP_DATASET_COLLECTOR_DEVICE_ID
+#define APP_DATASET_COLLECTOR_DEVICE_ID "goouuuu-cam"
+#endif
+#ifndef APP_DATASET_COLLECTOR_UPLOAD_URL
+#define APP_DATASET_COLLECTOR_UPLOAD_URL "http://192.168.1.2:8080/api/v1/captures"
+#endif
+#ifndef APP_DATASET_COLLECTOR_UPLOAD_TIMEOUT_MS
+#define APP_DATASET_COLLECTOR_UPLOAD_TIMEOUT_MS 15000
+#endif
+#ifndef APP_DATASET_COLLECTOR_IDLE_INTERVAL_MS
+#define APP_DATASET_COLLECTOR_IDLE_INTERVAL_MS (15 * 60 * 1000)
+#endif
+#ifndef APP_DATASET_COLLECTOR_MOTION_GUARD_MS
+#define APP_DATASET_COLLECTOR_MOTION_GUARD_MS (10 * 1000)
+#endif
+#ifndef APP_DATASET_COLLECTOR_MOTION_IMAGE_COUNT
+#define APP_DATASET_COLLECTOR_MOTION_IMAGE_COUNT 2
+#endif
+#ifndef APP_DATASET_COLLECTOR_MOTION_IMAGE_SPACING_MS
+#define APP_DATASET_COLLECTOR_MOTION_IMAGE_SPACING_MS (2 * 1000)
+#endif
+#ifndef APP_DATASET_COLLECTOR_POST_BURST_GUARD_MS
+#define APP_DATASET_COLLECTOR_POST_BURST_GUARD_MS (5 * 60 * 1000)
+#endif
+#ifndef APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES
+#define APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES 3
+#endif
+// Polling is sufficient here because trigger timing is in seconds, not microseconds.
+#define APP_CAPTURE_TRIGGER_POLL_MS 50
+// Idle low, capture high: ESP-IDF power management switches between these bounds.
+#define APP_CPU_FREQ_IDLE_MHZ 80
+#define APP_CPU_FREQ_ACTIVE_MHZ 240
+#ifndef APP_PERSON_DETECT_ENABLED
+#define APP_PERSON_DETECT_ENABLED 1
+#endif
+#define APP_PERSON_DETECT_MODEL_REQUIRED 0
+#define APP_PERSON_DETECT_BACKEND_PEDESTRIAN 1
+#define APP_PERSON_DETECT_BACKEND_COCO_320 2
+#define APP_PERSON_DETECT_BACKEND_EDGE_IMPULSE 3
+#ifndef APP_PERSON_DETECT_BACKEND
+#define APP_PERSON_DETECT_BACKEND APP_PERSON_DETECT_BACKEND_PEDESTRIAN
+#endif
+#define APP_PERSON_DETECT_COCO_PERSON_CATEGORY 0
+#define APP_PERSON_DETECT_CANDIDATE_THRESHOLD 0.45f
+#define APP_PERSON_DETECT_PRESENT_THRESHOLD 0.60f
+#define APP_PERSON_CLASSIFIER_PRESENT_THRESHOLD 0.45f
+#define APP_PERSON_DETECT_NMS_THRESHOLD 0.45f
+#define APP_PERSON_DETECT_SCORE_SMOOTHING_ALPHA 0.35f
+#define APP_PERSON_DETECT_PRESENCE_HOLD_FRAMES 2
+#define APP_PERSON_MOTION_GRID_WIDTH 16
+#define APP_PERSON_MOTION_GRID_HEIGHT 12
+#define APP_PERSON_MOTION_CELL_DIFF_THRESHOLD 18
+#define APP_PERSON_MOTION_CHANGED_CELL_RATIO 0.18f
+#define APP_PERSON_DETECT_MODEL_NAME "person_detect.espdl"
+#define APP_CAMERA_XCLK_HZ 20000000
+#define APP_CAMERA_JPEG_QUALITY 10
+#define APP_CAMERA_WARMUP_FRAMES 3
+#define APP_CAMERA_TRIGGER_FRAMES 2
+#ifndef APP_CAPTURE_ON_STARTUP
+#define APP_CAPTURE_ON_STARTUP 1
+#endif
+#ifndef APP_CAPTURE_TRIGGER_BURST_COUNT
+#define APP_CAPTURE_TRIGGER_BURST_COUNT 3
+#endif
+#define APP_CAMERA_AE_LEVEL 0
+#define APP_CAMERA_GAINCEILING GAINCEILING_8X
+#define APP_CAMERA_BRIGHTNESS 0
+#define APP_CAMERA_CONTRAST 0
+
+// Use the largest practical PSRAM-backed frame for better detector input detail.
+#ifndef APP_CAMERA_FRAME_SIZE_PSRAM
+#define APP_CAMERA_FRAME_SIZE_PSRAM FRAMESIZE_UXGA
+#endif
+#ifndef APP_CAMERA_FRAME_SIZE_NO_PSRAM
+#define APP_CAMERA_FRAME_SIZE_NO_PSRAM FRAMESIZE_VGA
+#endif
+
+// ESP32-S3 + OV2640 wiring.
+#define CAM_PIN_PWDN -1
+#define CAM_PIN_RESET -1
+#define CAM_PIN_XCLK 15
+#define CAM_PIN_SIOD 4
+#define CAM_PIN_SIOC 5
+
+#define CAM_PIN_D7 16
+#define CAM_PIN_D6 17
+#define CAM_PIN_D5 18
+#define CAM_PIN_D4 12
+#define CAM_PIN_D3 10
+#define CAM_PIN_D2 8
+#define CAM_PIN_D1 9
+#define CAM_PIN_D0 11
+#define CAM_PIN_VSYNC 6
+#define CAM_PIN_HREF 7
+#define CAM_PIN_PCLK 13
+

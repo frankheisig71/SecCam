@@ -1,0 +1,17 @@
+I (96306) mini_cam: CPU boost active: 240 MHz for capture processing
+I (96466) app_camera: Stored JPEG in RAM (96764 bytes, using frame 2/2)
+I (96786) app_camera: Stored JPEG in RAM (102284 bytes, using frame 2/2)
+I (97106) app_camera: Stored JPEG in RAM (101236 bytes, using frame 2/2)
+I (97416) app_camera: Stored JPEG in RAM (98047 bytes, using frame 2/2)
+I (97736) app_camera: Stored JPEG in RAM (97126 bytes, using frame 2/2)
+I (99636) app_person_detect: Person detect result (pedestrian_pico): present=yes detections=1 score=0.839 inference=186 ms
+I (101526) app_person_detect: Person detect result (pedestrian_pico): present=yes detections=1 score=0.824 inference=187 ms
+E (102736) task_wdt: Task watchdog got triggered. The following tasks/users did not reset the watchdog in time:
+E (102736) task_wdt:  - IDLE1 (CPU 1)
+E (102736) task_wdt: Tasks currently running:
+E (102736) task_wdt: CPU 0: IDLE0
+E (102736) task_wdt: CPU 1: capture_supervi
+E (102736) task_wdt: Print CPU 1 backtrace
+
+
+ABacktrace: 0x40375AEF:0x3FC9F990 0x40378B5E:0x3FC9F9B0 0x421D8CA9:0x3FCCD6D0 0x40046AE7:0x3FCCD700 0x421D8E89:0x3FCCD780 0x42161009:0x3FCCD830 0x42002219:0x3FCCD890 0x4200258D:0x3FCCD910 0x42001455:0x3FCCD940
