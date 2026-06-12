@@ -24,10 +24,12 @@ Das Collector-Target `esp32-s3-cam-edge-impulse-capture` sendet jedes JPEG direk
 
 ## Dateinamen auf dem Pi
 
-Ein einfacher Receiver kann daraus Dateinamen wie diese erzeugen:
+Der Receiver setzt den Dateinamen serverseitig aus der Pi-Zeit, damit die Ablage nicht von der ESP-Uhr abhaengt.
 
-- `goouuuu-cam_motion_1718200000123456_s1of3.jpg`
-- `goouuuu-cam_idle_1718200900123456_s1of1.jpg`
+- `CAM_250612_143015_123.jpg`
+- `CAM_250612_143017_041.jpg`
+
+Das Format ist `CAM_YYMMDD_HHMMSS_MMM.jpg`.
 
 ## Curl-Test
 

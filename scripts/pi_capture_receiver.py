@@ -10,6 +10,7 @@ import logging
 import signal
 import sys
 import configparser
+from datetime import datetime
 from queue import Queue, Full, Empty
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +32,7 @@ WRITE_THREADS = 1  # Pi safe default
 max_image_size = DEFAULT_MAX_IMAGE_SIZE
 
 capture_queue: Queue
+filename_lock = threading.Lock()
 
 def sanitize_path_component(value: str, fallback: str) -> str:
     sanitized = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in value.strip())
@@ -49,6 +51,14 @@ def integer_header(headers, name: str, default: int) -> int:
         return int(raw_value)
     except ValueError:
         return default
+
+
+def next_capture_filename() -> str:
+    with filename_lock:
+        while True:
+            now = datetime.now()
+            file_name = f"CAM_{now:%y%m%d_%H%M%S}_{now.microsecond // 1000:03d}.jpg"
+            return file_name
 
 def load_config(path: str) -> dict:
     cfg = configparser.ConfigParser()
@@ -82,15 +92,11 @@ def build_capture_paths(output_root: Path, headers) -> tuple[Path, Path, dict[st
     sequence_index = integer_header(headers, "X-Sequence-Index", 1)
     sequence_size = integer_header(headers, "X-Sequence-Size", 1)
 
-    day_bucket = f"{captured_at_us // 1000000 // 86400:05d}" if captured_at_us > 0 else "unsorted"
-    target_dir = output_root / device_id / capture_mode / day_bucket
-    file_stem = (
-        f"{device_id}_{capture_mode}_{capture_reason}_{captured_at_us}_"
-        f"{image_width}x{image_height}_s{sequence_index}of{sequence_size}"
-    )
-    image_path = target_dir / f"{file_stem}.jpg"
-    metadata_path = target_dir / f"{file_stem}.json"
+    file_name = next_capture_filename()
+    image_path = output_root / file_name
+    metadata_path = output_root / file_name.replace(".jpg", ".json")
     metadata = {
+        "file_name": file_name,
         "device_id": device_id,
         "capture_mode": capture_mode,
         "capture_reason": capture_reason,
@@ -112,7 +118,7 @@ def writer_worker(queue):
             continue
 
         try:
-            payload, target_path, metadata = item
+            payload, target_path, metadata_path, metadata = item
 
             target_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -123,9 +129,9 @@ def writer_worker(queue):
             metadata["file_name"] = target_path.name
             metadata["file_size"] = len(payload)
 
-            tmp_meta = target_path.with_suffix(".json.tmp")
+            tmp_meta = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
             tmp_meta.write_text(json.dumps(metadata), encoding="utf-8")
-            tmp_meta.replace(target_path.with_suffix(".json"))
+            tmp_meta.replace(metadata_path)
 
         except Exception as e:
             LOGGER.exception("write failed: %s", e)
@@ -165,7 +171,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
         target_path, metadata_path, metadata = build_capture_paths(self.output_dir, self.headers)
 
         try:
-            capture_queue.put_nowait((payload, target_path, metadata))
+            capture_queue.put_nowait((payload, target_path, metadata_path, metadata))
         except Full:
             self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "server overloaded")
             return

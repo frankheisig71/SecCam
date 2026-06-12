@@ -3,7 +3,11 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+.vscode/tasks.json
+.vscode/settings.json
 .venv
+.backup_managed_components
 
 include/app_secrets.h
+
 

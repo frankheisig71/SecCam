@@ -47,6 +47,10 @@ void free_queued_capture(QueuedCaptureUpload *capture) {
   *capture = {};
 }
 
+bool queue_has_backlog() {
+  return g_upload_queue != nullptr && uxQueueMessagesWaiting(g_upload_queue) > 0;
+}
+
 esp_err_t upload_capture_once(const QueuedCaptureUpload &capture) {
   esp_http_client_config_t config = {};
   config.url = APP_DATASET_COLLECTOR_UPLOAD_URL;
@@ -127,6 +131,15 @@ void upload_task(void *) {
       while (app_wifi_sta_is_busy()) {
         ESP_LOGI(kTag, "Uploader waiting for STA reconnect before retrying queued capture");
         vTaskDelay(pdMS_TO_TICKS(1000));
+      }
+#endif
+
+#if !APP_DATASET_COLLECTOR_UPLOAD_RETRY_WITH_BACKLOG
+      if (attempt > 1 && queue_has_backlog()) {
+        ESP_LOGW(kTag,
+                 "Dropping stale queued capture after failed attempt because %u newer uploads are waiting",
+                 static_cast<unsigned>(uxQueueMessagesWaiting(g_upload_queue)));
+        break;
       }
 #endif
 
@@ -217,10 +230,11 @@ esp_err_t app_capture_uploader_upload_latest_image(const char *capture_reason,
 
   if (xQueueSend(g_upload_queue, &capture, pdMS_TO_TICKS(APP_DATASET_COLLECTOR_UPLOAD_QUEUE_TIMEOUT_MS)) != pdTRUE) {
     ESP_LOGW(kTag,
-             "Upload queue full, dropping capture: reason=%s seq=%u/%u",
+             "Upload queue full, dropping new capture: reason=%s seq=%u/%u backlog=%u",
              capture.capture_reason,
              static_cast<unsigned>(capture.sequence_index),
-             static_cast<unsigned>(capture.sequence_size));
+             static_cast<unsigned>(capture.sequence_size),
+             static_cast<unsigned>(g_upload_queue != nullptr ? uxQueueMessagesWaiting(g_upload_queue) : 0));
     free_queued_capture(&capture);
     return ESP_ERR_TIMEOUT;
   }
