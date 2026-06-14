@@ -12,3 +12,5 @@ esp_err_t app_capture_uploader_upload_latest_image(const char *capture_reason,
                                                    bool motion_capture,
                                                    uint32_t sequence_index,
                                                    uint32_t sequence_size);
+
+bool app_capture_uploader_should_pause_motion_capture();

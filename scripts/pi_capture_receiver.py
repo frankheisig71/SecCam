@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import threading
-import time
 import argparse
-import json
 import logging
 import signal
 import sys
@@ -15,7 +13,6 @@ from queue import Queue, Full, Empty
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from socketserver import ThreadingMixIn
 from typing import Any
 
 DEFAULT_CONFIG_FILE = "/etc/seccam-receiver.conf"
@@ -53,11 +50,12 @@ def integer_header(headers, name: str, default: int) -> int:
         return default
 
 
-def next_capture_filename() -> str:
+def next_capture_filename(capture_mode: str) -> str:
     with filename_lock:
         while True:
             now = datetime.now()
-            file_name = f"CAM_{now:%y%m%d_%H%M%S}_{now.microsecond // 1000:03d}.jpg"
+            prefix = "idle_" if capture_mode == "idle" else ""
+            file_name = f"{prefix}CAM_{now:%y%m%d_%H%M%S}_{now.microsecond // 1000:03d}.jpg"
             return file_name
 
 def load_config(path: str) -> dict:
@@ -92,7 +90,7 @@ def build_capture_paths(output_root: Path, headers) -> tuple[Path, Path, dict[st
     sequence_index = integer_header(headers, "X-Sequence-Index", 1)
     sequence_size = integer_header(headers, "X-Sequence-Size", 1)
 
-    file_name = next_capture_filename()
+    file_name = next_capture_filename(capture_mode)
     image_path = output_root / file_name
     metadata_path = output_root / file_name.replace(".jpg", ".json")
     metadata = {
@@ -126,12 +124,12 @@ def writer_worker(queue):
             tmp_img.write_bytes(payload)
             tmp_img.replace(target_path)
 
-            metadata["file_name"] = target_path.name
-            metadata["file_size"] = len(payload)
-
-            tmp_meta = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
-            tmp_meta.write_text(json.dumps(metadata), encoding="utf-8")
-            tmp_meta.replace(metadata_path)
+            # Metadata sidecar output is intentionally disabled for now.
+            # metadata["file_name"] = target_path.name
+            # metadata["file_size"] = len(payload)
+            # tmp_meta = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+            # tmp_meta.write_text(json.dumps(metadata), encoding="utf-8")
+            # tmp_meta.replace(metadata_path)
 
         except Exception as e:
             LOGGER.exception("write failed: %s", e)

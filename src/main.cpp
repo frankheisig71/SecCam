@@ -388,10 +388,8 @@ esp_err_t perform_motion_dataset_batch_capture() {
   const TickType_t guard_start_tick = xTaskGetTickCount();
   g_motion_dataset_guard_until_tick = guard_start_tick + pdMS_TO_TICKS(APP_DATASET_COLLECTOR_MOTION_GUARD_MS);
   if (g_motion_dataset_sequence_count >= APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES) {
-    g_motion_dataset_burst_guard_until_tick =
-        guard_start_tick + pdMS_TO_TICKS(APP_DATASET_COLLECTOR_POST_BURST_GUARD_MS);
     g_motion_dataset_sequence_count = 0;
-    g_motion_dataset_guard_until_tick = g_motion_dataset_burst_guard_until_tick;
+    g_motion_dataset_burst_guard_until_tick = 0;
   }
 
   return batch_err;
@@ -574,6 +572,7 @@ void capture_supervisor_task(void *) {
     bool should_collect_idle = false;
     if (current_gpio_level != 0 && now >= g_motion_dataset_burst_guard_until_tick &&
         now >= g_motion_dataset_guard_until_tick &&
+        !app_capture_uploader_should_pause_motion_capture() &&
         g_motion_dataset_sequence_count < APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES) {
       should_collect_motion = true;
     }

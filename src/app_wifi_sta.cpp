@@ -22,6 +22,7 @@ esp_netif_t *g_sta_netif = nullptr;
 TaskHandle_t g_connect_task = nullptr;
 std::atomic<bool> g_sta_busy{false};
 std::atomic<bool> g_connect_requested{false};
+std::atomic<bool> g_sta_connecting{false};
 
 void request_sta_connect() {
   g_sta_busy.store(true, std::memory_order_relaxed);
@@ -40,16 +41,27 @@ void sta_connect_task(void *) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     while (g_connect_requested.exchange(false, std::memory_order_acq_rel)) {
+      if (g_sta_connecting.load(std::memory_order_relaxed)) {
+        break;
+      }
+
       if (g_sta_busy.load(std::memory_order_relaxed)) {
         vTaskDelay(kReconnectRetryDelay);
       }
 
+      g_sta_connecting.store(true, std::memory_order_relaxed);
       const esp_err_t connect_err = esp_wifi_connect();
       if (connect_err == ESP_OK) {
         ESP_LOGI(kTag, "STA connect requested for %s", APP_WIFI_STA_SSID);
         break;
       }
 
+      if (connect_err == ESP_ERR_WIFI_CONN) {
+        ESP_LOGI(kTag, "STA connect already in progress for %s", APP_WIFI_STA_SSID);
+        break;
+      }
+
+      g_sta_connecting.store(false, std::memory_order_relaxed);
       ESP_LOGW(kTag, "esp_wifi_connect failed: %s", esp_err_to_name(connect_err));
       vTaskDelay(kReconnectRetryDelay);
       g_connect_requested.store(true, std::memory_order_relaxed);
@@ -92,6 +104,7 @@ void on_wifi_event(void *, esp_event_base_t event_base, int32_t event_id, void *
   if (event_id == WIFI_EVENT_STA_START) {
     request_sta_connect();
   } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+    g_sta_connecting.store(false, std::memory_order_relaxed);
     g_sta_busy.store(true, std::memory_order_relaxed);
     ESP_LOGI(kTag, "STA associated with %s, waiting for DHCP lease", APP_WIFI_STA_SSID);
     /*
@@ -103,6 +116,7 @@ void on_wifi_event(void *, esp_event_base_t event_base, int32_t event_id, void *
     }
     */
   } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    g_sta_connecting.store(false, std::memory_order_relaxed);
     const auto *disconnected = static_cast<wifi_event_sta_disconnected_t *>(event_data);
     const int reason = disconnected != nullptr ? disconnected->reason : -1;
     const int rssi = disconnected != nullptr ? disconnected->rssi : 0;
@@ -121,6 +135,7 @@ void on_ip_event(void *, esp_event_base_t event_base, int32_t event_id, void *ev
     return;
   }
 
+  g_sta_connecting.store(false, std::memory_order_relaxed);
   g_sta_busy.store(false, std::memory_order_relaxed);
   const auto *got_ip = static_cast<ip_event_got_ip_t *>(event_data);
   ESP_LOGI(kTag,
@@ -200,6 +215,28 @@ esp_err_t app_wifi_sta_start() {
            APP_WIFI_STA_SSID,
            static_cast<unsigned>(wifi_config.sta.failure_retry_cnt),
            static_cast<int>(wifi_config.sta.threshold.authmode));
+  return ESP_OK;
+}
+
+esp_err_t app_wifi_sta_force_reconnect() {
+  if (g_connect_task == nullptr) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (g_sta_connecting.load(std::memory_order_relaxed)) {
+    ESP_LOGI(kTag, "Forced STA reconnect skipped because a connect attempt is already in progress");
+    return ESP_OK;
+  }
+
+  g_sta_busy.store(true, std::memory_order_relaxed);
+  g_sta_connecting.store(false, std::memory_order_relaxed);
+  const esp_err_t disconnect_err = esp_wifi_disconnect();
+  if (disconnect_err != ESP_OK && disconnect_err != ESP_ERR_WIFI_NOT_CONNECT) {
+    ESP_LOGW(kTag, "esp_wifi_disconnect failed during forced reconnect: %s", esp_err_to_name(disconnect_err));
+  }
+
+  request_sta_connect();
+  ESP_LOGW(kTag, "Forced STA reconnect requested");
   return ESP_OK;
 }
 
