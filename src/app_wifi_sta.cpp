@@ -8,15 +8,54 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include <atomic>
 
 namespace {
 
 constexpr char kTag[] = "app_wifi_sta";
+constexpr TickType_t kReconnectRetryDelay = pdMS_TO_TICKS(250);
 bool g_handlers_registered = false;
 esp_netif_t *g_sta_netif = nullptr;
+TaskHandle_t g_connect_task = nullptr;
 std::atomic<bool> g_sta_busy{false};
+std::atomic<bool> g_connect_requested{false};
+
+void request_sta_connect() {
+  g_sta_busy.store(true, std::memory_order_relaxed);
+  if (g_connect_task == nullptr) {
+    return;
+  }
+
+  const bool already_requested = g_connect_requested.exchange(true, std::memory_order_acq_rel);
+  if (!already_requested) {
+    xTaskNotifyGive(g_connect_task);
+  }
+}
+
+void sta_connect_task(void *) {
+  while (true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+    while (g_connect_requested.exchange(false, std::memory_order_acq_rel)) {
+      if (g_sta_busy.load(std::memory_order_relaxed)) {
+        vTaskDelay(kReconnectRetryDelay);
+      }
+
+      const esp_err_t connect_err = esp_wifi_connect();
+      if (connect_err == ESP_OK) {
+        ESP_LOGI(kTag, "STA connect requested for %s", APP_WIFI_STA_SSID);
+        break;
+      }
+
+      ESP_LOGW(kTag, "esp_wifi_connect failed: %s", esp_err_to_name(connect_err));
+      vTaskDelay(kReconnectRetryDelay);
+      g_connect_requested.store(true, std::memory_order_relaxed);
+    }
+  }
+}
 
 const char *wifi_disconnect_reason_name(uint8_t reason) {
   switch (reason) {
@@ -51,8 +90,7 @@ void on_wifi_event(void *, esp_event_base_t event_base, int32_t event_id, void *
   }
 
   if (event_id == WIFI_EVENT_STA_START) {
-    g_sta_busy.store(true, std::memory_order_relaxed);
-    esp_wifi_connect();
+    request_sta_connect();
   } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
     g_sta_busy.store(true, std::memory_order_relaxed);
     ESP_LOGI(kTag, "STA associated with %s, waiting for DHCP lease", APP_WIFI_STA_SSID);
@@ -65,7 +103,6 @@ void on_wifi_event(void *, esp_event_base_t event_base, int32_t event_id, void *
     }
     */
   } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
-    g_sta_busy.store(true, std::memory_order_relaxed);
     const auto *disconnected = static_cast<wifi_event_sta_disconnected_t *>(event_data);
     const int reason = disconnected != nullptr ? disconnected->reason : -1;
     const int rssi = disconnected != nullptr ? disconnected->rssi : 0;
@@ -75,7 +112,7 @@ void on_wifi_event(void *, esp_event_base_t event_base, int32_t event_id, void *
              reason,
              disconnected != nullptr ? wifi_disconnect_reason_name(disconnected->reason) : "UNKNOWN",
              rssi);
-    esp_wifi_connect();
+    request_sta_connect();
   }
 }
 
@@ -124,6 +161,14 @@ esp_err_t ensure_wifi_stack() {
         kTag,
         "Register IP event handler failed");
     g_handlers_registered = true;
+  }
+
+  if (g_connect_task == nullptr) {
+    const BaseType_t task_ok = xTaskCreate(sta_connect_task, "wifi_sta_connect", 3072, nullptr, 6, &g_connect_task);
+    if (task_ok != pdPASS) {
+      g_connect_task = nullptr;
+      return ESP_ERR_NO_MEM;
+    }
   }
 
   initialized = true;
