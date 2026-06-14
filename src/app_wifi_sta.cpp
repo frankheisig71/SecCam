@@ -56,12 +56,14 @@ void on_wifi_event(void *, esp_event_base_t event_base, int32_t event_id, void *
   } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
     g_sta_busy.store(true, std::memory_order_relaxed);
     ESP_LOGI(kTag, "STA associated with %s, waiting for DHCP lease", APP_WIFI_STA_SSID);
+    /*
     if (g_sta_netif != nullptr) {
       const esp_err_t dhcp_err = esp_netif_dhcpc_start(g_sta_netif);
       if (dhcp_err != ESP_OK && dhcp_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED) {
         ESP_LOGW(kTag, "DHCP client start failed: %s", esp_err_to_name(dhcp_err));
       }
     }
+    */
   } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
     g_sta_busy.store(true, std::memory_order_relaxed);
     const auto *disconnected = static_cast<wifi_event_sta_disconnected_t *>(event_data);
