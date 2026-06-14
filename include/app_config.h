@@ -1,5 +1,7 @@
 #pragma once
 
+#include <app_secrets.h>
+
 // WiFi mode selection.
 #define APP_WIFI_MODE_AP 1
 #define APP_WIFI_MODE_STA 2
@@ -13,10 +15,6 @@
 #define APP_WIFI_AP_PASSWORD "goouuuu123"
 #define APP_WIFI_AP_CHANNEL 6
 #define APP_WIFI_AP_MAX_CLIENTS 4
-
-// Station assumptions: adjust these placeholders for the target infrastructure.
-#define APP_WIFI_STA_SSID "HEISIG2"
-#define APP_WIFI_STA_PASSWORD "3869124067135153"
 
 // Capture cadence and image quality assumptions.
 // No periodic capture: new images are triggered only by PIR, HTTP, or startup.

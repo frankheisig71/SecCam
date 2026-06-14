@@ -675,7 +675,9 @@ extern "C" void app_main(void) {
     ESP_LOGE(kTag, "Failed to create capture mutex");
     abort();
   }
-
+  ESP_ERROR_CHECK(start_selected_wifi_mode());
+  vTaskDelay(pdMS_TO_TICKS(3000));
+  
   ESP_ERROR_CHECK(app_camera_init());
   ESP_ERROR_CHECK(app_person_detect_init());
   ESP_ERROR_CHECK(configure_power_management());
@@ -685,7 +687,6 @@ extern "C" void app_main(void) {
 #if APP_CAPTURE_ON_STARTUP
   ESP_ERROR_CHECK(perform_capture("startup", 1, false));
 #endif
-  ESP_ERROR_CHECK(start_selected_wifi_mode());
 #if APP_HTTP_SERVER_ENABLED
   ESP_ERROR_CHECK(app_http_server_start(&capture_now_from_http));
 #endif
