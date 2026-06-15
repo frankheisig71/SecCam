@@ -37,6 +37,9 @@ capture_queue: Queue
 filename_lock = threading.Lock()
 shutdown_event = threading.Event()
 writer_threads: list[threading.Thread] = []
+pending_lock = threading.Lock()
+pending_batch: list[dict[str, Any]] = []
+pending_flush_deadline: float | None = None
 
 def sanitize_path_component(value: str, fallback: str) -> str:
     sanitized = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in value.strip())
@@ -168,31 +171,73 @@ def flush_staged_batch(batch: list[dict[str, Any]]) -> None:
     )
 
 
+def queue_staged_capture(item: dict[str, Any], batch_flush_seconds: int) -> int:
+    global pending_flush_deadline
+
+    with pending_lock:
+        pending_batch.append(item)
+        if len(pending_batch) == 1:
+            pending_flush_deadline = time.monotonic() + batch_flush_seconds
+        return len(pending_batch)
+
+
+def take_pending_batch_if_due(now_monotonic: float) -> list[dict[str, Any]]:
+    global pending_flush_deadline
+
+    with pending_lock:
+        if not pending_batch or pending_flush_deadline is None or now_monotonic < pending_flush_deadline:
+            return []
+
+        batch = pending_batch[:]
+        pending_batch.clear()
+        pending_flush_deadline = None
+        return batch
+
+
+def take_pending_batch_if_full(batch_size: int) -> list[dict[str, Any]]:
+    global pending_flush_deadline
+
+    with pending_lock:
+        if len(pending_batch) < batch_size:
+            return []
+
+        batch = pending_batch[:]
+        pending_batch.clear()
+        pending_flush_deadline = None
+        return batch
+
+
+def take_pending_batch_on_shutdown() -> list[dict[str, Any]]:
+    global pending_flush_deadline
+
+    with pending_lock:
+        if not pending_batch:
+            return []
+
+        batch = pending_batch[:]
+        pending_batch.clear()
+        pending_flush_deadline = None
+        return batch
+
+
 def writer_worker(queue, stage_dir: Path, batch_size: int, batch_flush_seconds: int):
-    pending: list[dict[str, Any]] = []
-
-    def flush_pending() -> None:
-        nonlocal pending
-        if pending:
-            flush_staged_batch(pending)
-            pending = []
-
-    def flush_if_due() -> None:
-        if pending and (datetime.now() - pending[0]["queued_at"]).total_seconds() >= batch_flush_seconds:
-            flush_pending()
-
     while True:
         should_exit = False
         try:
             item = queue.get(timeout=1)
         except Empty:
-            flush_if_due()
-            if shutdown_event.is_set() and not pending:
+            due_batch = take_pending_batch_if_due(time.monotonic())
+            if due_batch:
+                flush_staged_batch(due_batch)
+
+            if shutdown_event.is_set() and not pending_batch:
                 return
             continue
 
         if item is None:
-            flush_pending()
+            due_batch = take_pending_batch_on_shutdown()
+            if due_batch:
+                flush_staged_batch(due_batch)
             should_exit = True
             item = None
 
@@ -200,18 +245,18 @@ def writer_worker(queue, stage_dir: Path, batch_size: int, batch_flush_seconds: 
             if item is not None:
                 payload, target_path, _metadata_path, _metadata = item
                 staged_path = write_staged_image(stage_dir, target_path.name, payload)
-                pending.append(
+                pending_count = queue_staged_capture(
                     {
                         "staged_path": staged_path,
                         "target_path": target_path,
-                        "queued_at": datetime.now(),
-                    }
+                    },
+                    batch_flush_seconds,
                 )
 
-                if len(pending) >= batch_size:
-                    flush_pending()
-                else:
-                    flush_if_due()
+                if pending_count >= batch_size:
+                    full_batch = take_pending_batch_if_full(batch_size)
+                    if full_batch:
+                        flush_staged_batch(full_batch)
         except Exception:
             LOGGER.exception("write failed")
         finally:
@@ -219,6 +264,16 @@ def writer_worker(queue, stage_dir: Path, batch_size: int, batch_flush_seconds: 
 
         if should_exit:
             return
+
+
+def batch_flush_watcher(batch_flush_seconds: int) -> None:
+    while not shutdown_event.is_set() or pending_batch:
+        due_batch = take_pending_batch_if_due(time.monotonic())
+        if due_batch:
+            flush_staged_batch(due_batch)
+            continue
+
+        time.sleep(min(5, batch_flush_seconds))
 
 class CaptureHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -283,6 +338,7 @@ def main() -> None:
     global capture_queue
     global max_image_size
     global writer_threads
+    watcher_thread = None
 
     parser = argparse.ArgumentParser(description="Receive ESP captures ans store to dosk")
     parser.add_argument("--config", default=DEFAULT_CONFIG_FILE, help="configuration file")
@@ -340,6 +396,8 @@ def main() -> None:
             t = threading.Thread(target=writer_worker, daemon=False, args=(capture_queue, stage_path, batch_size, batch_flush_seconds))
             t.start()
             writer_threads.append(t)
+        watcher_thread = threading.Thread(target=batch_flush_watcher, daemon=False, args=(batch_flush_seconds,))
+        watcher_thread.start()
         server.serve_forever()
     except KeyboardInterrupt:
         LOGGER.info("keyboard interrupt, shutting down")
@@ -349,6 +407,11 @@ def main() -> None:
             capture_queue.put(None)
         for thread in writer_threads:
             thread.join(timeout=10)
+        if watcher_thread is not None:
+            watcher_thread.join(timeout=10)
+        remaining_batch = take_pending_batch_on_shutdown()
+        if remaining_batch:
+            flush_staged_batch(remaining_batch)
         server.server_close()
         LOGGER.info("server stopped")
 
