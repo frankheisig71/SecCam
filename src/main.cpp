@@ -681,7 +681,7 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(app_person_detect_init());
   ESP_ERROR_CHECK(configure_power_management());
 #if APP_DATASET_COLLECTOR_ENABLED
-  ESP_ERROR_CHECK(app_capture_uploader_init());
+  ESP_ERROR_CHECK(app_capture_uploader_init(g_cpu_max_lock));
 #endif
 #if APP_CAPTURE_ON_STARTUP
   ESP_ERROR_CHECK(perform_capture("startup", 1, false));

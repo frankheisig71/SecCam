@@ -3,8 +3,9 @@
 #include <cstdint>
 
 #include "esp_err.h"
+#include "esp_pm.h"
 
-esp_err_t app_capture_uploader_init();
+esp_err_t app_capture_uploader_init(esp_pm_lock_handle_t cpu_max_lock);
 
 // Copies the latest JPEG from the camera buffer into an internal FIFO.
 // A dedicated worker task uploads queued images one-by-one and retries failed transfers.

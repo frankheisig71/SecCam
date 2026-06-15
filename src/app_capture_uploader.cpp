@@ -33,6 +33,7 @@ struct QueuedCaptureUpload {
 
 QueueHandle_t g_upload_queue = nullptr;
 TaskHandle_t g_upload_task = nullptr;
+esp_pm_lock_handle_t g_cpu_max_lock = nullptr;
 std::atomic<uint32_t> g_exhausted_upload_failure_streak{0};
 std::atomic<TickType_t> g_motion_capture_pause_until_tick{0};
 std::atomic<bool> g_failure_reconnect_armed{true};
@@ -68,6 +69,31 @@ bool requeue_capture_to_tail(QueuedCaptureUpload *capture) {
 void note_upload_success() {
   g_exhausted_upload_failure_streak.store(0, std::memory_order_relaxed);
   g_failure_reconnect_armed.store(true, std::memory_order_relaxed);
+}
+
+bool acquire_upload_cpu_boost() {
+  if (g_cpu_max_lock == nullptr) {
+    return true;
+  }
+
+  const esp_err_t err = esp_pm_lock_acquire(g_cpu_max_lock);
+  if (err != ESP_OK) {
+    ESP_LOGW(kTag, "HTTP upload CPU boost acquire failed: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  return true;
+}
+
+void release_upload_cpu_boost() {
+  if (g_cpu_max_lock == nullptr) {
+    return;
+  }
+
+  const esp_err_t err = esp_pm_lock_release(g_cpu_max_lock);
+  if (err != ESP_OK) {
+    ESP_LOGW(kTag, "HTTP upload CPU boost release failed: %s", esp_err_to_name(err));
+  }
 }
 
 void note_exhausted_upload_failure() {
@@ -179,7 +205,13 @@ void upload_task(void *) {
       }
 #endif
 
+      if (!acquire_upload_cpu_boost()) {
+        upload_err = ESP_FAIL;
+        break;
+      }
+
       upload_err = upload_capture_once(capture);
+      release_upload_cpu_boost();
       if (upload_err == ESP_OK) {
         note_upload_success();
         break;
@@ -237,10 +269,12 @@ void upload_task(void *) {
 
 }  // namespace
 
-esp_err_t app_capture_uploader_init() {
+esp_err_t app_capture_uploader_init(esp_pm_lock_handle_t cpu_max_lock) {
   if (g_upload_queue != nullptr && g_upload_task != nullptr) {
     return ESP_OK;
   }
+
+  g_cpu_max_lock = cpu_max_lock;
 
   if (g_upload_queue == nullptr) {
     g_upload_queue = xQueueCreate(APP_DATASET_COLLECTOR_UPLOAD_QUEUE_DEPTH, sizeof(QueuedCaptureUpload));

@@ -8,6 +8,8 @@ import logging
 import signal
 import sys
 import configparser
+import shutil
+import time
 from datetime import datetime
 from queue import Queue, Full, Empty
 from http import HTTPStatus
@@ -22,6 +24,9 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
 DEFAULT_MAX_IMAGE_SIZE = 500000
 DEFAULT_MAX_QUEUE_SIZE = 10
+DEFAULT_STAGE_DIR = "/tmp/seccam-receiver-stage"
+DEFAULT_BATCH_SIZE = 100
+DEFAULT_BATCH_FLUSH_SECONDS = 2 * 60 * 60
 
 LOGGER = logging.getLogger("pi_capture_receiver")
 MAX_QUEUE = 10  # schützt RAM & Pi
@@ -30,6 +35,8 @@ max_image_size = DEFAULT_MAX_IMAGE_SIZE
 
 capture_queue: Queue
 filename_lock = threading.Lock()
+shutdown_event = threading.Event()
+writer_threads: list[threading.Thread] = []
 
 def sanitize_path_component(value: str, fallback: str) -> str:
     sanitized = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in value.strip())
@@ -74,10 +81,13 @@ def load_config(path: str) -> dict:
 
     return {
         "output_dir": section.get("output_dir", DEFAULT_OUTPUT_DIR),
+        "stage_dir": section.get("stage_dir", DEFAULT_STAGE_DIR),
         "host": section.get("host", DEFAULT_HOST),
         "port": section.getint("port", DEFAULT_PORT),
         "max_image_size": section.getint("max_image_size", DEFAULT_MAX_IMAGE_SIZE),
         "max_queue_size": section.getint("max_queue_size", DEFAULT_MAX_QUEUE_SIZE),
+        "batch_size": section.getint("batch_size", DEFAULT_BATCH_SIZE),
+        "batch_flush_seconds": section.getint("batch_flush_seconds", DEFAULT_BATCH_FLUSH_SECONDS),
     }
 
 def build_capture_paths(output_root: Path, headers) -> tuple[Path, Path, dict[str, Any]]:
@@ -108,34 +118,107 @@ def build_capture_paths(output_root: Path, headers) -> tuple[Path, Path, dict[st
     return image_path, metadata_path, metadata
 
 
-def writer_worker(queue):
+def write_staged_image(stage_dir: Path, file_name: str, payload: bytes) -> Path:
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    staged_path = stage_dir / file_name
+    tmp_path = staged_path.with_suffix(".part")
+    tmp_path.write_bytes(payload)
+    tmp_path.replace(staged_path)
+    return staged_path
+
+
+def flush_staged_batch(batch: list[dict[str, Any]]) -> None:
+    if not batch:
+        return
+
+    total_bytes = 0
+    for item in batch:
+        staged_path = item["staged_path"]
+        try:
+            total_bytes += staged_path.stat().st_size
+        except FileNotFoundError:
+            LOGGER.warning("staged file missing before flush: %s", staged_path)
+
+    flush_started = time.monotonic()
+    LOGGER.info("flushing %d captures to NAS (%d bytes)", len(batch), total_bytes)
+
+    for item in batch:
+        staged_path = item["staged_path"]
+        target_path = item["target_path"]
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            shutil.move(str(staged_path), str(target_path))
+        except Exception:
+            LOGGER.exception("flush failed for %s", staged_path)
+            continue
+
+        # Metadata sidecar output is intentionally disabled for now.
+        # metadata["file_name"] = target_path.name
+        # metadata["file_size"] = target_path.stat().st_size
+        # tmp_meta = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+        # tmp_meta.write_text(json.dumps(metadata), encoding="utf-8")
+        # tmp_meta.replace(metadata_path)
+
+    LOGGER.info(
+        "flushed %d captures to NAS in %.3f s",
+        len(batch),
+        time.monotonic() - flush_started,
+    )
+
+
+def writer_worker(queue, stage_dir: Path, batch_size: int, batch_flush_seconds: int):
+    pending: list[dict[str, Any]] = []
+
+    def flush_pending() -> None:
+        nonlocal pending
+        if pending:
+            flush_staged_batch(pending)
+            pending = []
+
+    def flush_if_due() -> None:
+        if pending and (datetime.now() - pending[0]["queued_at"]).total_seconds() >= batch_flush_seconds:
+            flush_pending()
+
     while True:
+        should_exit = False
         try:
             item = queue.get(timeout=1)
         except Empty:
+            flush_if_due()
+            if shutdown_event.is_set() and not pending:
+                return
             continue
 
+        if item is None:
+            flush_pending()
+            should_exit = True
+            item = None
+
         try:
-            payload, target_path, metadata_path, metadata = item
+            if item is not None:
+                payload, target_path, _metadata_path, _metadata = item
+                staged_path = write_staged_image(stage_dir, target_path.name, payload)
+                pending.append(
+                    {
+                        "staged_path": staged_path,
+                        "target_path": target_path,
+                        "queued_at": datetime.now(),
+                    }
+                )
 
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-
-            tmp_img = target_path.with_suffix(".tmp")
-            tmp_img.write_bytes(payload)
-            tmp_img.replace(target_path)
-
-            # Metadata sidecar output is intentionally disabled for now.
-            # metadata["file_name"] = target_path.name
-            # metadata["file_size"] = len(payload)
-            # tmp_meta = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
-            # tmp_meta.write_text(json.dumps(metadata), encoding="utf-8")
-            # tmp_meta.replace(metadata_path)
-
-        except Exception as e:
-            LOGGER.exception("write failed: %s", e)
-
+                if len(pending) >= batch_size:
+                    flush_pending()
+                else:
+                    flush_if_due()
+        except Exception:
+            LOGGER.exception("write failed")
         finally:
             queue.task_done()
+
+        if should_exit:
+            return
 
 class CaptureHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -199,6 +282,7 @@ def main() -> None:
 
     global capture_queue
     global max_image_size
+    global writer_threads
 
     parser = argparse.ArgumentParser(description="Receive ESP captures ans store to dosk")
     parser.add_argument("--config", default=DEFAULT_CONFIG_FILE, help="configuration file")
@@ -206,18 +290,31 @@ def main() -> None:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--stage-dir", default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--batch-flush-seconds", type=int, default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    host = cfg.get("host", args.host)
-    port = cfg.get("port", args.port)
-    output_dir = cfg.get("output_dir", args.output_dir)
+    host = args.host if args.host is not None else cfg.get("host", DEFAULT_HOST)
+    port = args.port if args.port is not None else cfg.get("port", DEFAULT_PORT)
+    output_dir = args.output_dir if args.output_dir is not None else cfg.get("output_dir", DEFAULT_OUTPUT_DIR)
+    stage_dir = args.stage_dir if args.stage_dir is not None else cfg.get("stage_dir", DEFAULT_STAGE_DIR)
     if not output_dir:
         LOGGER.error("output_dir is not set (config or --output-dir required)")
+        sys.exit(1)
+    if not stage_dir:
+        LOGGER.error("stage_dir is not set (config or --stage-dir required)")
         sys.exit(1)
 
     max_image_size = cfg.get("max_image_size", DEFAULT_MAX_IMAGE_SIZE)
     queue_size = cfg.get("max_queue_size",  DEFAULT_MAX_QUEUE_SIZE)
+    batch_size = args.batch_size if args.batch_size is not None else cfg.get("batch_size", DEFAULT_BATCH_SIZE)
+    batch_flush_seconds = (
+        args.batch_flush_seconds
+        if args.batch_flush_seconds is not None
+        else cfg.get("batch_flush_seconds", DEFAULT_BATCH_FLUSH_SECONDS)
+    )
 
     capture_queue = Queue(maxsize=queue_size)
 
@@ -225,6 +322,7 @@ def main() -> None:
 
     CaptureHandler.output_dir = Path(output_dir)
     CaptureHandler.max_image_size = max_image_size
+    stage_path = Path(stage_dir)
 
     server = CaptureHTTPServer((host, port), CaptureHandler)
     install_signal_handlers(server)
@@ -233,14 +331,24 @@ def main() -> None:
                 host,
                 port,
                 CaptureHandler.output_dir.resolve())
+    LOGGER.info("staging captures in %s batch_size=%d batch_flush_seconds=%d",
+                stage_path.resolve(),
+                batch_size,
+                batch_flush_seconds)
     try:
         for _ in range(WRITE_THREADS):
-            t = threading.Thread(target=writer_worker, daemon=True, args=(capture_queue,))
+            t = threading.Thread(target=writer_worker, daemon=False, args=(capture_queue, stage_path, batch_size, batch_flush_seconds))
             t.start()
+            writer_threads.append(t)
         server.serve_forever()
     except KeyboardInterrupt:
         LOGGER.info("keyboard interrupt, shutting down")
     finally:
+        shutdown_event.set()
+        for _ in writer_threads:
+            capture_queue.put(None)
+        for thread in writer_threads:
+            thread.join(timeout=10)
         server.server_close()
         LOGGER.info("server stopped")
 
