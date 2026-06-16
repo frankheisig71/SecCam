@@ -18,9 +18,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "img_converters.h"
-#if APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_COCO_320
+#if APP_PERSON_DETECT_HAS_CLASSIFIER && APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_COCO_320
 #include "coco_detect.hpp"
-#elif APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_PEDESTRIAN
+#elif APP_PERSON_DETECT_HAS_CLASSIFIER && APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_PEDESTRIAN
 #include "pedestrian_detect.hpp"
 #endif
 
@@ -28,7 +28,6 @@ namespace {
 
 constexpr char kTag[] = "app_person_detect";
 SemaphoreHandle_t g_person_status_mutex = nullptr;
-dl::detect::Detect *g_detector = nullptr;
 app_person_detection_status_t g_status = {};
 constexpr size_t kMotionGridCellCount =
     static_cast<size_t>(APP_PERSON_MOTION_GRID_WIDTH) * static_cast<size_t>(APP_PERSON_MOTION_GRID_HEIGHT);
@@ -41,6 +40,9 @@ struct MotionReference {
 
 SemaphoreHandle_t g_motion_reference_mutex = nullptr;
 MotionReference g_motion_reference = {};
+
+#if APP_PERSON_DETECT_HAS_CLASSIFIER
+dl::detect::Detect *g_detector = nullptr;
 
 const char *model_partition_label() {
 #if APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_COCO_320
@@ -107,6 +109,8 @@ bool is_person_detection(const dl::detect::result_t &result) {
 #endif
 }
 
+#endif
+
 void update_status(const app_person_detection_status_t &new_status) {
   if (g_person_status_mutex == nullptr) {
     return;
@@ -118,6 +122,7 @@ void update_status(const app_person_detection_status_t &new_status) {
   }
 }
 
+#if APP_PERSON_DETECT_ENABLED
 void build_motion_fingerprint(const uint8_t *rgb_data, uint16_t width, uint16_t height, uint8_t *fingerprint) {
   if (rgb_data == nullptr || fingerprint == nullptr || width == 0 || height == 0) {
     return;
@@ -284,7 +289,7 @@ esp_err_t analyze_jpeg_image(const uint8_t *jpeg_data,
     return ESP_ERR_NOT_FOUND;
   }
 
-#if APP_PERSON_DETECT_BACKEND != APP_PERSON_DETECT_BACKEND_EDGE_IMPULSE
+#if APP_PERSON_DETECT_HAS_CLASSIFIER
   if (g_detector == nullptr) {
     return ESP_ERR_NOT_FOUND;
   }
@@ -307,7 +312,6 @@ esp_err_t analyze_jpeg_image(const uint8_t *jpeg_data,
     return ESP_FAIL;
   }
 
-  const int64_t started_at_us = esp_timer_get_time();
   std::array<uint8_t, kMotionGridCellCount> fingerprint = {};
   build_motion_fingerprint(rgb_data, width, height, fingerprint.data());
 
@@ -355,29 +359,8 @@ esp_err_t analyze_jpeg_image(const uint8_t *jpeg_data,
     return ESP_OK;
   }
 
-#if APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_EDGE_IMPULSE
-  heap_caps_free(rgb_data);
-  new_status.person_present = false;
-  new_status.detection_count = 0;
-  new_status.score = 0.0f;
-  new_status.inference_time_ms = 0;
-
-  if (publish_status) {
-    update_status(new_status);
-  }
-  if (status != nullptr) {
-    *status = new_status;
-  }
-  if (frame_score != nullptr) {
-    *frame_score = 0.0f;
-  }
-
-  ESP_LOGI(kTag,
-           "Edge Impulse backend placeholder active: motion=%.3f, classifier not integrated yet",
-           static_cast<double>(new_status.motion_score));
-  return ESP_OK;
-#endif
-
+#if APP_PERSON_DETECT_HAS_CLASSIFIER
+  const int64_t started_at_us = esp_timer_get_time();
   dl::image::img_t image = {
       .data = rgb_data,
       .width = width,
@@ -426,7 +409,30 @@ esp_err_t analyze_jpeg_image(const uint8_t *jpeg_data,
            static_cast<double>(new_status.score),
            static_cast<unsigned>(new_status.inference_time_ms));
   return ESP_OK;
+#else
+  heap_caps_free(rgb_data);
+  new_status.person_present = false;
+  new_status.detection_count = 0;
+  new_status.score = 0.0f;
+  new_status.inference_time_ms = 0;
+
+  if (publish_status) {
+    update_status(new_status);
+  }
+  if (status != nullptr) {
+    *status = new_status;
+  }
+  if (frame_score != nullptr) {
+    *frame_score = 0.0f;
+  }
+
+  ESP_LOGI(kTag,
+           "Edge Impulse backend placeholder active: motion=%.3f, classifier not integrated yet",
+           static_cast<double>(new_status.motion_score));
+  return ESP_OK;
+#endif
 }
+#endif
 
 }  // namespace
 
@@ -451,21 +457,13 @@ esp_err_t app_person_detect_init() {
   update_status(g_status);
   return ESP_OK;
 #else
+#if APP_PERSON_DETECT_HAS_CLASSIFIER
   if (!has_valid_model_partition()) {
     update_status(g_status);
     return APP_PERSON_DETECT_MODEL_REQUIRED ? ESP_ERR_NOT_FOUND : ESP_OK;
   }
 
-#if APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_EDGE_IMPULSE
-  g_status.ready = true;
-  g_status.model_loaded = false;
-  update_status(g_status);
-  ESP_LOGI(kTag, "%s target initialized without embedded classifier yet", backend_name());
-  return ESP_OK;
-#endif
-
-    #if APP_PERSON_DETECT_BACKEND != APP_PERSON_DETECT_BACKEND_EDGE_IMPULSE
-    if (g_detector == nullptr) {
+  if (g_detector == nullptr) {
 #if APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_COCO_320
     auto *detector = new (std::nothrow) COCODetect(COCODetect::YOLO11N_320_S8_V1, true);
 #elif APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_PEDESTRIAN
@@ -484,7 +482,6 @@ esp_err_t app_person_detect_init() {
     }
     g_detector = detector;
   }
-  #endif
 
   g_status.model_loaded = true;
   update_status(g_status);
@@ -495,10 +492,20 @@ esp_err_t app_person_detect_init() {
            static_cast<double>(APP_PERSON_DETECT_PRESENT_THRESHOLD),
            static_cast<double>(APP_PERSON_DETECT_NMS_THRESHOLD));
   return ESP_OK;
+#else
+  g_status.ready = true;
+  g_status.model_loaded = false;
+  update_status(g_status);
+  ESP_LOGI(kTag, "edge_impulse target initialized without embedded classifier yet");
+  return ESP_OK;
+#endif
 #endif
 }
 
 esp_err_t app_person_detect_refresh_reference_from_latest_image() {
+#if !APP_PERSON_DETECT_ENABLED
+  return ESP_OK;
+#else
   const uint8_t *jpeg_data = nullptr;
   size_t jpeg_size = 0;
   int64_t captured_at_us = 0;
@@ -517,6 +524,7 @@ esp_err_t app_person_detect_refresh_reference_from_latest_image() {
     ESP_LOGI(kTag, "Motion reference refreshed from latest image");
   }
   return refresh_err;
+#endif
 }
 
 esp_err_t app_person_detect_get_motion_reference(uint8_t *fingerprint,
@@ -548,6 +556,11 @@ esp_err_t app_person_detect_get_motion_debug(app_person_motion_debug_t *debug_in
   if (debug_info == nullptr) {
     return ESP_ERR_INVALID_ARG;
   }
+
+#if !APP_PERSON_DETECT_ENABLED
+  (void)timeout_ms;
+  return ESP_ERR_NOT_SUPPORTED;
+#else
 
   const uint8_t *jpeg_data = nullptr;
   size_t jpeg_size = 0;
@@ -587,6 +600,7 @@ esp_err_t app_person_detect_get_motion_debug(app_person_motion_debug_t *debug_in
 
   float motion_score = 0.0f;
   return fill_motion_debug_from_fingerprint(fingerprint.data(), captured_at_us, debug_info, &motion_score);
+#endif
 }
 
 esp_err_t app_person_detect_analyze_latest_image() {
@@ -632,7 +646,9 @@ esp_err_t app_person_detect_analyze_jpeg_image(const uint8_t *jpeg_data,
                                                uint16_t height,
                                                app_person_detection_status_t *status,
                                                float *frame_score) {
-#if !APP_PERSON_DETECT_ENABLED
+#if APP_PERSON_DETECT_ENABLED
+  return analyze_jpeg_image(jpeg_data, jpeg_size, width, height, status, frame_score, false);
+#else
   if (status != nullptr) {
     *status = g_status;
   }
@@ -641,8 +657,6 @@ esp_err_t app_person_detect_analyze_jpeg_image(const uint8_t *jpeg_data,
   }
   return ESP_OK;
 #endif
-
-  return analyze_jpeg_image(jpeg_data, jpeg_size, width, height, status, frame_score, false);
 }
 
 esp_err_t app_person_detect_get_status(app_person_detection_status_t *status, uint32_t timeout_ms) {

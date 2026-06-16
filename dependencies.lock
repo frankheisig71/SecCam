@@ -1,15 +1,4 @@
 dependencies:
-  espressif/coco_detect:
-    component_hash: 97968b34a4fa44e543f87885c0017dac6c1e1e45afe54c18646dc4f51fb4bf95
-    dependencies:
-    - name: espressif/esp-dl
-      registry_url: https://components.espressif.com
-      require: private
-      version: ~3.3.0
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 0.4.0
   espressif/dl_fft:
     component_hash: ced3cf28cc70452b7859c06f4e5059215167254a2047e34c893d6f501ccd6ea2
     dependencies:
@@ -105,27 +94,14 @@ dependencies:
     - esp32c61
     - esp32h4
     version: 1.0.2
-  espressif/pedestrian_detect:
-    component_hash: 882a6986cb5e7e9bb8e87861fb42379a7eeb2f4a4a78104c6a78f42a6cb35fb4
-    dependencies:
-    - name: espressif/esp-dl
-      registry_url: https://components.espressif.com
-      require: private
-      version: ~3.3.0
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 0.3.2
   idf:
     source:
       type: idf
     version: 5.5.3
 direct_dependencies:
-- espressif/coco_detect
 - espressif/esp-dl
 - espressif/esp32-camera
-- espressif/pedestrian_detect
 - idf
-manifest_hash: d89e368242f4decc1237758eb13d99a7ccbbf1ad5f31833d58ec19263920ba7c
+manifest_hash: 5fead76e28b5ab1910e9b1d3ed6c402e0cb7d82ebd3f99dd0c1716668b47fa5f
 target: esp32s3
 version: 2.0.0

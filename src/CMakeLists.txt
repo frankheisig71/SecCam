@@ -6,4 +6,4 @@ idf_component_register(SRCS "main.cpp"
                             "app_wifi_ap.cpp"
                             "app_wifi_sta.cpp"
                        INCLUDE_DIRS "../include"
-                       REQUIRES esp-dl pedestrian_detect esp_driver_rmt esp_http_client)
+                       REQUIRES esp-dl esp_driver_rmt esp_http_client)
