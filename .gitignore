@@ -7,6 +7,10 @@
 .vscode/settings.json
 .venv
 .backup_managed_components
+doc
+
+*.log
+*.code-workspace
 
 include/app_secrets.h
 
