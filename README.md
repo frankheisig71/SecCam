@@ -64,6 +64,8 @@ Wichtige Hinweise:
 
 Die wichtigsten Schalter liegen in `include/app_config.h`.
 
+Eine kompakte Uebersicht, welche Optionen pro Target wirklich abweichen, steht in [SDKCONFIG_OVERVIEW.md](SDKCONFIG_OVERVIEW.md).
+
 ### WLAN-Modus
 
 ```cpp
@@ -83,6 +85,15 @@ Die wichtigsten Schalter liegen in `include/app_config.h`.
 ```
 
 Im AP-Modus ist die Weboberflaeche normalerweise unter `http://192.168.4.1/` erreichbar.
+
+Fuer die Objektiv-Einstellung gibt es zusaetzlich das Target `esp32-s3-cam-setup`.
+Dort laeuft der AP unter `http://192.168.125.1/`, aktualisiert das Bild alle 500 ms und bietet einen IR-Schalter.
+
+### Build-Targets
+
+- `esp32-s3-cam-edge-impulse`: Analyse-Variante mit Edge-Impulse-Modell
+- `esp32-s3-cam-capture`: JPEG-Upload-Variante fuer Trainingsdaten
+- `esp32-s3-cam-setup`: AP-Setup fuer Objektivjustage
 
 ### Station-Modus
 

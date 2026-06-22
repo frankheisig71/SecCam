@@ -10,11 +10,39 @@
 #define APP_WIFI_MODE APP_WIFI_MODE_AP
 #endif
 
+// Setup mode keeps only AP preview capture and the IR toggle UI.
+#ifndef APP_SETUP_PROJECT
+#define APP_SETUP_PROJECT 0
+#endif
+#ifndef APP_SETUP_PREVIEW_INTERVAL_MS
+#define APP_SETUP_PREVIEW_INTERVAL_MS 500
+#endif
+
 // Access point assumptions: the module opens its own AP so a browser can connect directly.
+#ifndef APP_WIFI_AP_SSID
 #define APP_WIFI_AP_SSID "GooUuuu-CAM"
+#endif
+#ifndef APP_WIFI_AP_PASSWORD
 #define APP_WIFI_AP_PASSWORD "goouuuu123"
+#endif
+#ifndef APP_WIFI_AP_CHANNEL
 #define APP_WIFI_AP_CHANNEL 6
+#endif
+#ifndef APP_WIFI_AP_MAX_CLIENTS
 #define APP_WIFI_AP_MAX_CLIENTS 4
+#endif
+#ifndef APP_WIFI_AP_IP_ADDR
+#define APP_WIFI_AP_IP_ADDR "192.168.4.1"
+#endif
+
+#if APP_SETUP_PROJECT
+#undef APP_WIFI_AP_SSID
+#define APP_WIFI_AP_SSID "esp32-s3-cam-setup"
+#undef APP_WIFI_AP_PASSWORD
+#define APP_WIFI_AP_PASSWORD "goouuuu123"
+#undef APP_WIFI_AP_IP_ADDR
+#define APP_WIFI_AP_IP_ADDR "192.168.125.1"
+#endif
 
 // Capture cadence and image quality assumptions.
 // No periodic capture: new images are triggered only by PIR, HTTP, or startup.
@@ -125,7 +153,9 @@
 #define APP_CAMERA_XCLK_HZ 20000000
 #define APP_CAMERA_JPEG_QUALITY 10
 #define APP_CAMERA_WARMUP_FRAMES 3
+#ifndef APP_CAMERA_TRIGGER_FRAMES
 #define APP_CAMERA_TRIGGER_FRAMES 2
+#endif
 #ifndef APP_CAPTURE_ON_STARTUP
 #define APP_CAPTURE_ON_STARTUP 1
 #endif

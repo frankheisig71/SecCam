@@ -4,13 +4,11 @@
 #include "app_capture_uploader.h"
 #include "app_config.h"
 #include "app_http_server.h"
+#include "app_ir_led.h"
 #include "app_person_detect.h"
 #include "app_wifi_ap.h"
 #include "app_wifi_sta.h"
 #include "driver/gpio.h"
-#include "driver/rmt_common.h"
-#include "driver/rmt_encoder.h"
-#include "driver/rmt_tx.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_pm.h"
@@ -34,8 +32,6 @@ TickType_t g_motion_dataset_guard_until_tick = 0;
 TickType_t g_motion_dataset_burst_guard_until_tick = 0;
 uint32_t g_motion_dataset_sequence_count = 0;
 #endif
-rmt_channel_handle_t g_status_led_channel = nullptr;
-rmt_encoder_handle_t g_status_led_encoder = nullptr;
 
 bool should_pause_camera_activity();
 
@@ -47,65 +43,24 @@ struct BufferedCaptureImage {
   uint16_t height = 0;
 };
 
-void set_status_led_level(int trigger_level) {
-  if (g_status_led_channel == nullptr || g_status_led_encoder == nullptr) {
-    return;
-  }
-
-  const uint32_t blue_level = trigger_level != 0 ? APP_STATUS_LED_BRIGHTNESS : 0;
-  const uint8_t pixel_data[3] = {0, 0, static_cast<uint8_t>(blue_level)};
-  rmt_transmit_config_t tx_config = {};
-  tx_config.loop_count = 0;
-  tx_config.flags.eot_level = 0;
-  tx_config.flags.queue_nonblocking = 0;
-
-  if (rmt_transmit(g_status_led_channel, g_status_led_encoder, pixel_data, sizeof(pixel_data), &tx_config) != ESP_OK) {
-    return;
-  }
-  rmt_tx_wait_all_done(g_status_led_channel, 100);
-}
-
-esp_err_t init_status_led() {
-  rmt_tx_channel_config_t tx_channel_config = {};
-  tx_channel_config.gpio_num = APP_STATUS_LED_GPIO;
-  tx_channel_config.clk_src = RMT_CLK_SRC_DEFAULT;
-  tx_channel_config.resolution_hz = 10 * 1000 * 1000;
-  tx_channel_config.mem_block_symbols = 64;
-  tx_channel_config.trans_queue_depth = 1;
-  tx_channel_config.intr_priority = 0;
-  tx_channel_config.flags.invert_out = 0;
-  tx_channel_config.flags.with_dma = 0;
-  tx_channel_config.flags.io_loop_back = 0;
-  tx_channel_config.flags.io_od_mode = 0;
-  tx_channel_config.flags.allow_pd = 0;
-  tx_channel_config.flags.init_level = 0;
-
-  ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&tx_channel_config, &g_status_led_channel),
-                      kTag,
-                      "Status LED RMT channel init failed");
-
-  rmt_bytes_encoder_config_t bytes_encoder_config = {};
-  bytes_encoder_config.bit0.level0 = 1;
-  bytes_encoder_config.bit0.duration0 = 4;
-  bytes_encoder_config.bit0.level1 = 0;
-  bytes_encoder_config.bit0.duration1 = 8;
-  bytes_encoder_config.bit1.level0 = 1;
-  bytes_encoder_config.bit1.duration0 = 8;
-  bytes_encoder_config.bit1.level1 = 0;
-  bytes_encoder_config.bit1.duration1 = 4;
-  bytes_encoder_config.flags.msb_first = 1;
-
-  ESP_RETURN_ON_ERROR(rmt_new_bytes_encoder(&bytes_encoder_config, &g_status_led_encoder),
-                      kTag,
-                      "Status LED RMT encoder init failed");
-  ESP_RETURN_ON_ERROR(rmt_enable(g_status_led_channel), kTag, "Status LED RMT enable failed");
-  set_status_led_level(0);
-  return ESP_OK;
-}
-
 void yield_after_heavy_step() {
   vTaskDelay(1);
 }
+
+#if APP_SETUP_PROJECT
+void setup_preview_task(void *) {
+  while (true) {
+    if (!app_http_server_is_transmitting_image()) {
+      const esp_err_t capture_err = app_camera_capture_now();
+      if (capture_err != ESP_OK) {
+        ESP_LOGW(kTag, "Setup preview capture failed: %s", esp_err_to_name(capture_err));
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(APP_SETUP_PREVIEW_INTERVAL_MS));
+  }
+}
+#endif
 
 bool are_triggers_suppressed() {
   return g_trigger_processing || (xTaskGetTickCount() < g_trigger_block_until_tick);
@@ -547,16 +502,16 @@ void capture_supervisor_task(void *) {
   io_config.intr_type = GPIO_INTR_DISABLE;
   ESP_ERROR_CHECK(gpio_config(&io_config));
 
-  ESP_ERROR_CHECK(init_status_led());
+  ESP_ERROR_CHECK(app_ir_led_init());
 
   int last_gpio_level = gpio_get_level(APP_CAPTURE_TRIGGER_GPIO);
   TickType_t last_motion_tick = xTaskGetTickCount();
-  set_status_led_level(last_gpio_level);
+  app_ir_led_set_enabled(last_gpio_level != 0);
 
   while (true) {
     const TickType_t now = xTaskGetTickCount();
     const int current_gpio_level = gpio_get_level(APP_CAPTURE_TRIGGER_GPIO);
-    set_status_led_level(current_gpio_level);
+    app_ir_led_set_enabled(current_gpio_level != 0);
 
     if (current_gpio_level != 0) {
       last_motion_tick = now;
@@ -674,9 +629,23 @@ extern "C" void app_main(void) {
     ESP_LOGE(kTag, "Failed to create capture mutex");
     abort();
   }
+#if APP_SETUP_PROJECT
+  ESP_ERROR_CHECK(start_selected_wifi_mode());
+  ESP_ERROR_CHECK(app_camera_init());
+  ESP_ERROR_CHECK(app_ir_led_init());
+  ESP_ERROR_CHECK(configure_power_management());
+#if APP_HTTP_SERVER_ENABLED
+  ESP_ERROR_CHECK(app_http_server_start(nullptr));
+#endif
+  const BaseType_t preview_task_ok = xTaskCreate(setup_preview_task, "setup_preview", 4096, nullptr, 5, nullptr);
+  if (preview_task_ok != pdPASS) {
+    ESP_LOGE(kTag, "Failed to start setup preview task");
+    abort();
+  }
+#else
   ESP_ERROR_CHECK(start_selected_wifi_mode());
   vTaskDelay(pdMS_TO_TICKS(3000));
-  
+
   ESP_ERROR_CHECK(app_camera_init());
   ESP_ERROR_CHECK(app_person_detect_init());
   ESP_ERROR_CHECK(configure_power_management());
@@ -695,6 +664,7 @@ extern "C" void app_main(void) {
     ESP_LOGE(kTag, "Failed to start capture supervisor task");
     abort();
   }
+#endif
 
   ESP_LOGI(kTag, "Application started");
 }

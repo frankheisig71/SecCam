@@ -1,6 +1,6 @@
 # Training Capture API
 
-Das Collector-Target `esp32-s3-cam-edge-impulse-capture` sendet jedes JPEG direkt per HTTP POST an einen Dienst auf dem Pi.
+Das Collector-Target `esp32-s3-cam-capture` sendet jedes JPEG direkt per HTTP POST an einen Dienst auf dem Pi.
 
 ## Endpoint
 

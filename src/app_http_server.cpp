@@ -2,9 +2,11 @@
 
 #include <array>
 #include <cstdio>
+#include <cstring>
 
 #include "app_camera.h"
 #include "app_config.h"
+#include "app_ir_led.h"
 #include "app_person_detect.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
@@ -68,6 +70,116 @@ void end_image_transfer() {
 
 // Serves the small built-in browser UI for manual capture and image preview.
 esp_err_t root_get_handler(httpd_req_t *req) {
+#if APP_SETUP_PROJECT
+  static constexpr char kPage[] = R"HTML(
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>esp32-s3-cam-setup</title>
+    <style>
+      :root { color-scheme: light; font-family: Inter, system-ui, sans-serif; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: radial-gradient(circle at top, #f7efe0 0, #eef3f6 35%, #dde7ee 100%);
+        color: #153040;
+      }
+      main { max-width: 960px; margin: 0 auto; padding: 28px 20px 40px; }
+      .shell {
+        background: rgba(255,255,255,0.82);
+        border: 1px solid rgba(21,48,64,0.08);
+        border-radius: 24px;
+        padding: 22px;
+        box-shadow: 0 30px 70px rgba(16, 35, 48, 0.15);
+        backdrop-filter: blur(8px);
+      }
+      h1 { margin: 0 0 8px; font-size: 2rem; }
+      p { margin: 0 0 18px; color: #557084; }
+      .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 18px;
+        font-weight: 700;
+        cursor: pointer;
+        transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+      }
+      button:hover { transform: translateY(-1px); }
+      button:active { transform: translateY(0); opacity: 0.9; }
+      #ir-button.on { background: #143d2e; color: #fff; }
+      #ir-button.off { background: #d7dee3; color: #153040; }
+      .frame {
+        margin-top: 18px;
+        border-radius: 20px;
+        overflow: hidden;
+        background: #0e1720;
+        min-height: 320px;
+      }
+      img {
+        display: block;
+        width: 100%;
+        height: auto;
+        object-fit: contain;
+        background: #0e1720;
+      }
+      .meta { margin-top: 12px; color: #5a7180; font-size: 0.95rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="shell">
+        <h1>esp32-s3-cam-setup</h1>
+        <p>Objektiv einstellen: Livebild aktualisiert alle 500 ms, der PIR-Eingang bleibt ungenutzt.</p>
+        <div class="row">
+          <button id="ir-button" type="button">IR laden...</button>
+        </div>
+        <div class="frame">
+          <img id="frame" alt="Kamerabild" />
+        </div>
+        <div id="meta" class="meta">Verbinde zur Kamera...</div>
+      </section>
+    </main>
+    <script>
+      const frame = document.getElementById('frame');
+      const button = document.getElementById('ir-button');
+      const meta = document.getElementById('meta');
+      let irEnabled = false;
+
+      function renderIrState() {
+        button.textContent = irEnabled ? 'IR off' : 'IR on';
+        button.className = irEnabled ? 'on' : 'off';
+        meta.textContent = irEnabled ? 'IR ist aktiv.' : 'IR ist aus.';
+      }
+
+      async function refreshIrState() {
+        const res = await fetch('/ir');
+        const data = await res.json();
+        irEnabled = !!data.enabled;
+        renderIrState();
+      }
+
+      async function setIrState(enabled) {
+        const res = await fetch(`/ir?enabled=${enabled ? 1 : 0}`);
+        const data = await res.json();
+        irEnabled = !!data.enabled;
+        renderIrState();
+      }
+
+      function refreshFrame() {
+        frame.src = `/image.jpg?t=${Date.now()}`;
+      }
+
+      button.addEventListener('click', () => setIrState(!irEnabled));
+      refreshFrame();
+      refreshIrState();
+      setInterval(refreshFrame, 500);
+    </script>
+  </body>
+</html>
+)HTML";
+#else
   static constexpr char kPage[] = R"HTML(
 <!doctype html>
 <html lang="de">
@@ -231,10 +343,30 @@ esp_err_t root_get_handler(httpd_req_t *req) {
   </body>
 </html>
 )HTML";
+#endif
 
   httpd_resp_set_type(req, "text/html; charset=utf-8");
   return httpd_resp_send(req, kPage, HTTPD_RESP_USE_STRLEN);
 }
+
+#if APP_SETUP_PROJECT
+esp_err_t ir_get_handler(httpd_req_t *req) {
+  bool enabled = app_ir_led_is_enabled();
+  char query[64] = {};
+  if (httpd_req_get_url_query_len(req) > 0 && httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char value[8] = {};
+    if (httpd_query_key_value(query, "enabled", value, sizeof(value)) == ESP_OK) {
+      enabled = std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 || std::strcmp(value, "on") == 0;
+      app_ir_led_set_enabled(enabled);
+    }
+  }
+
+  char payload[64] = {};
+  std::snprintf(payload, sizeof(payload), "{\"enabled\":%s}", enabled ? "true" : "false");
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
+}
+#endif
 
 // Returns lightweight metadata for the currently buffered RAM image.
 esp_err_t status_get_handler(httpd_req_t *req) {
@@ -481,18 +613,28 @@ esp_err_t app_http_server_start(app_http_capture_request_fn capture_request_fn) 
   ESP_RETURN_ON_ERROR(httpd_start(&server, &config), "app_http_server", "HTTP server start failed");
 
   httpd_uri_t root = {.uri = "/", .method = HTTP_GET, .handler = root_get_handler, .user_ctx = nullptr};
+  httpd_uri_t image = {.uri = "/image.jpg", .method = HTTP_GET, .handler = image_get_handler, .user_ctx = nullptr};
+#if APP_SETUP_PROJECT
+  httpd_uri_t ir = {.uri = "/ir", .method = HTTP_GET, .handler = ir_get_handler, .user_ctx = nullptr};
+#else
   httpd_uri_t status = {.uri = "/status", .method = HTTP_GET, .handler = status_get_handler, .user_ctx = nullptr};
   httpd_uri_t reference = {.uri = "/reference", .method = HTTP_GET, .handler = reference_get_handler, .user_ctx = nullptr};
   httpd_uri_t motion_debug = {.uri = "/motion-debug", .method = HTTP_GET, .handler = motion_debug_get_handler, .user_ctx = nullptr};
-  httpd_uri_t image = {.uri = "/image.jpg", .method = HTTP_GET, .handler = image_get_handler, .user_ctx = nullptr};
   httpd_uri_t capture = {.uri = "/capture", .method = HTTP_POST, .handler = capture_post_handler, .user_ctx = nullptr};
+#endif
 
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &root), "app_http_server", "Register root failed");
+  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &image), "app_http_server", "Register image failed");
+#if APP_SETUP_PROJECT
+  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &ir), "app_http_server", "Register IR endpoint failed");
+#else
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &status), "app_http_server", "Register status failed");
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &reference), "app_http_server", "Register reference failed");
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &motion_debug), "app_http_server", "Register motion debug failed");
-  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &image), "app_http_server", "Register image failed");
-  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &capture), "app_http_server", "Register capture failed");
+  if (g_capture_request_fn != nullptr) {
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &capture), "app_http_server", "Register capture failed");
+  }
+#endif
   return ESP_OK;
 }
 

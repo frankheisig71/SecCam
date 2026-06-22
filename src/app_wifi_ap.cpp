@@ -8,10 +8,12 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "lwip/ip4_addr.h"
 
 namespace {
 
 constexpr char kTag[] = "app_wifi_ap";
+esp_netif_t *g_ap_netif = nullptr;
 
 esp_err_t ensure_wifi_stack() {
   static bool initialized = false;
@@ -26,8 +28,8 @@ esp_err_t ensure_wifi_stack() {
     return loop_err;
   }
 
-  esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
-  if (ap_netif == nullptr) {
+  g_ap_netif = esp_netif_create_default_wifi_ap();
+  if (g_ap_netif == nullptr) {
     return ESP_FAIL;
   }
 
@@ -41,6 +43,23 @@ esp_err_t ensure_wifi_stack() {
 
 esp_err_t app_wifi_ap_start() {
   ESP_RETURN_ON_ERROR(ensure_wifi_stack(), kTag, "WiFi stack init failed");
+
+  esp_netif_ip_info_t ip_info = {};
+  ip4_addr_t ap_ip = {};
+  ip4_addr_t netmask = {};
+  if (!ip4addr_aton(APP_WIFI_AP_IP_ADDR, &ap_ip)) {
+    ESP_LOGW(kTag, "Invalid AP IP address string: %s", APP_WIFI_AP_IP_ADDR);
+  }
+  IP4_ADDR(&netmask, 255, 255, 255, 0);
+  ip_info.ip.addr = ap_ip.addr;
+  ip_info.gw.addr = ap_ip.addr;
+  ip_info.netmask.addr = netmask.addr;
+  if (g_ap_netif != nullptr) {
+    const esp_err_t ip_err = esp_netif_set_ip_info(g_ap_netif, &ip_info);
+    if (ip_err != ESP_OK) {
+      ESP_LOGW(kTag, "Setting AP IP info failed: %s", esp_err_to_name(ip_err));
+    }
+  }
 
   wifi_config_t wifi_config = {};
   std::memcpy(wifi_config.ap.ssid, APP_WIFI_AP_SSID, sizeof(APP_WIFI_AP_SSID) - 1);
@@ -60,6 +79,6 @@ esp_err_t app_wifi_ap_start() {
   ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &wifi_config), kTag, "Set AP config failed");
   ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "Start AP failed");
 
-  ESP_LOGI(kTag, "SoftAP active: ssid=%s password=%s", APP_WIFI_AP_SSID, APP_WIFI_AP_PASSWORD);
+  ESP_LOGI(kTag, "SoftAP active: ssid=%s password=%s ip=" IPSTR, APP_WIFI_AP_SSID, APP_WIFI_AP_PASSWORD, IP2STR(&ip_info.ip));
   return ESP_OK;
 }
