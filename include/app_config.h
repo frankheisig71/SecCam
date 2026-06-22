@@ -48,6 +48,10 @@
 // No periodic capture: new images are triggered only by PIR, HTTP, or startup.
 // External trigger input; a LOW-to-HIGH edge requests a new capture.
 #define APP_CAPTURE_TRIGGER_GPIO GPIO_NUM_21
+#define APP_IR_LED_GPIO GPIO_NUM_20
+#define APP_IR_LED_PRE_CAPTURE_MS 500
+#define APP_IR_LED_POST_FIRST_CAPTURE_MS 500
+#define APP_IR_LED_POST_SECOND_CAPTURE_MS 1000
 #define APP_STATUS_LED_GPIO GPIO_NUM_48
 #define APP_STATUS_LED_PIXEL_COUNT 1
 #define APP_STATUS_LED_BRIGHTNESS 16
@@ -62,7 +66,7 @@
 #define APP_HTTP_SERVER_ENABLED 1
 #endif
 #ifndef APP_DATASET_COLLECTOR_ENABLED
-#define APP_DATASET_COLLECTOR_ENABLED 0
+#define APP_DATASET_COLLECTOR_ENABLED 1
 #endif
 #ifndef APP_DATASET_COLLECTOR_DEVICE_ID
 #define APP_DATASET_COLLECTOR_DEVICE_ID "goouuuu-cam"

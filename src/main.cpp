@@ -12,6 +12,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "app_status_led.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -118,6 +119,13 @@ esp_err_t perform_trigger_capture(const char *reason) {
   }
   ESP_LOGI(kTag, "CPU boost active: %d MHz for capture processing", APP_CPU_FREQ_ACTIVE_MHZ);
 
+  // Enable IR LEDs for capture
+  app_ir_led_set_enabled(true);
+  ESP_LOGI(kTag, "IR-LED enabled for capture");
+  
+  // Wait before first capture
+  vTaskDelay(pdMS_TO_TICKS(APP_IR_LED_PRE_CAPTURE_MS));
+
   esp_err_t capture_err = ESP_OK;
   esp_err_t detect_err = ESP_OK;
   constexpr uint32_t kAnalyzeFrameCount = APP_CAPTURE_TRIGGER_ANALYZE_FRAMES;
@@ -142,6 +150,17 @@ esp_err_t perform_trigger_capture(const char *reason) {
       break;
     }
     yield_after_heavy_step();
+
+    // IR-LED timing: wait after first capture, longer after second
+    if (attempt == 0) {
+      ESP_LOGI(kTag, "First image captured, waiting %d ms before second image", 
+               APP_IR_LED_POST_FIRST_CAPTURE_MS);
+      vTaskDelay(pdMS_TO_TICKS(APP_IR_LED_POST_FIRST_CAPTURE_MS));
+    } else if (attempt == 1) {
+      ESP_LOGI(kTag, "Second image captured, waiting %d ms before final processing", 
+               APP_IR_LED_POST_SECOND_CAPTURE_MS);
+      vTaskDelay(pdMS_TO_TICKS(APP_IR_LED_POST_SECOND_CAPTURE_MS));
+    }
 
     if (recent_image_count == kAnalyzeFrameCount) {
       free_buffered_capture_image(&recent_images[0]);
@@ -201,6 +220,10 @@ esp_err_t perform_trigger_capture(const char *reason) {
   for (uint32_t index = 0; index < recent_image_count; ++index) {
     free_buffered_capture_image(&recent_images[index]);
   }
+
+  // Disable IR LEDs after capture
+  app_ir_led_set_enabled(false);
+  ESP_LOGI(kTag, "IR-LED disabled after capture");
 
   g_last_capture_tick = xTaskGetTickCount();
   g_trigger_block_until_tick = g_last_capture_tick + pdMS_TO_TICKS(APP_CAPTURE_TRIGGER_SUPPRESSION_MS);
@@ -323,6 +346,11 @@ esp_err_t perform_motion_dataset_batch_capture() {
     return ESP_ERR_INVALID_STATE;
   }
 
+  // Enable IR LEDs for motion capture
+  app_ir_led_set_enabled(true);
+  ESP_LOGI(kTag, "IR-LED enabled for motion capture batch");
+  vTaskDelay(pdMS_TO_TICKS(APP_IR_LED_PRE_CAPTURE_MS));
+
   const uint32_t batch_capture_count =
       std::min<uint32_t>(APP_DATASET_COLLECTOR_MOTION_IMAGE_COUNT, remaining_motion_captures);
   esp_err_t batch_err = ESP_OK;
@@ -336,9 +364,21 @@ esp_err_t perform_motion_dataset_batch_capture() {
 
     g_motion_dataset_sequence_count = sequence_index;
     if (batch_index + 1 < batch_capture_count) {
-      vTaskDelay(pdMS_TO_TICKS(APP_DATASET_COLLECTOR_MOTION_IMAGE_SPACING_MS));
+      // Timing between motion captures
+      if (batch_index == 0) {
+        ESP_LOGI(kTag, "First motion image captured, waiting %d ms before second", 
+                 APP_IR_LED_POST_FIRST_CAPTURE_MS);
+        vTaskDelay(pdMS_TO_TICKS(APP_IR_LED_POST_FIRST_CAPTURE_MS));
+      } else {
+        ESP_LOGI(kTag, "Motion image captured, waiting %d ms", APP_DATASET_COLLECTOR_MOTION_IMAGE_SPACING_MS);
+        vTaskDelay(pdMS_TO_TICKS(APP_DATASET_COLLECTOR_MOTION_IMAGE_SPACING_MS));
+      }
     }
   }
+
+  // Disable IR LEDs after motion capture
+  app_ir_led_set_enabled(false);
+  ESP_LOGI(kTag, "IR-LED disabled after motion capture batch");
 
   const TickType_t guard_start_tick = xTaskGetTickCount();
   g_motion_dataset_guard_until_tick = guard_start_tick + pdMS_TO_TICKS(APP_DATASET_COLLECTOR_MOTION_GUARD_MS);
@@ -489,7 +529,34 @@ esp_err_t capture_now_from_http() {
   if (are_triggers_suppressed()) {
     return ESP_ERR_INVALID_STATE;
   }
+
+#if APP_DATASET_COLLECTOR_ENABLED
+  if (g_capture_mutex == nullptr || g_cpu_max_lock == nullptr) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (xSemaphoreTake(g_capture_mutex, pdMS_TO_TICKS(10000)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  const esp_err_t acquire_err = esp_pm_lock_acquire(g_cpu_max_lock);
+  if (acquire_err != ESP_OK) {
+    xSemaphoreGive(g_capture_mutex);
+    return acquire_err;
+  }
+
+  esp_err_t capture_err = app_camera_capture_now();
+
+  const esp_err_t release_err = esp_pm_lock_release(g_cpu_max_lock);
+  if (release_err != ESP_OK) {
+    ESP_LOGW(kTag, "CPU max-frequency lock release failed: %s", esp_err_to_name(release_err));
+  }
+  xSemaphoreGive(g_capture_mutex);
+
+  return capture_err;
+#else
   return perform_capture("HTTP request", 1, false);
+#endif
 }
 #endif
 
@@ -503,6 +570,7 @@ void capture_supervisor_task(void *) {
   ESP_ERROR_CHECK(gpio_config(&io_config));
 
   ESP_ERROR_CHECK(app_ir_led_init());
+  ESP_ERROR_CHECK(app_status_led_init());
 
   int last_gpio_level = gpio_get_level(APP_CAPTURE_TRIGGER_GPIO);
   TickType_t last_motion_tick = xTaskGetTickCount();
@@ -515,6 +583,10 @@ void capture_supervisor_task(void *) {
 
     if (current_gpio_level != 0) {
       last_motion_tick = now;
+      // briefly blink status LED blue on PIR rising edge
+      if (last_gpio_level == 0) {
+        app_status_led_blink_blue_ms(200);
+      }
     }
 
 #if APP_DATASET_COLLECTOR_ENABLED
