@@ -48,7 +48,7 @@ void yield_after_heavy_step() {
   vTaskDelay(1);
 }
 
-#if APP_SETUP_PROJECT
+#if APP_WIFI_IS_AP
 void setup_preview_task(void *) {
   while (true) {
     if (!app_http_server_is_transmitting_image()) {

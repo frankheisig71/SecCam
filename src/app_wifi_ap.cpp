@@ -48,17 +48,21 @@ esp_err_t app_wifi_ap_start() {
   ip4_addr_t ap_ip = {};
   ip4_addr_t netmask = {};
   if (!ip4addr_aton(APP_WIFI_AP_IP_ADDR, &ap_ip)) {
-    ESP_LOGW(kTag, "Invalid AP IP address string: %s", APP_WIFI_AP_IP_ADDR);
+    ESP_LOGE(kTag, "Invalid AP IP address string: %s", APP_WIFI_AP_IP_ADDR);
+    return ESP_ERR_INVALID_ARG;
   }
   IP4_ADDR(&netmask, 255, 255, 255, 0);
   ip_info.ip.addr = ap_ip.addr;
   ip_info.gw.addr = ap_ip.addr;
   ip_info.netmask.addr = netmask.addr;
   if (g_ap_netif != nullptr) {
-    const esp_err_t ip_err = esp_netif_set_ip_info(g_ap_netif, &ip_info);
-    if (ip_err != ESP_OK) {
-      ESP_LOGW(kTag, "Setting AP IP info failed: %s", esp_err_to_name(ip_err));
+    const esp_err_t dhcp_stop_err = esp_netif_dhcps_stop(g_ap_netif);
+    if (dhcp_stop_err != ESP_OK && dhcp_stop_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+      ESP_LOGE(kTag, "Stopping AP DHCP server failed: %s", esp_err_to_name(dhcp_stop_err));
+      return dhcp_stop_err;
     }
+
+    ESP_RETURN_ON_ERROR(esp_netif_set_ip_info(g_ap_netif, &ip_info), kTag, "Setting AP IP info failed");
   }
 
   wifi_config_t wifi_config = {};
@@ -79,6 +83,23 @@ esp_err_t app_wifi_ap_start() {
   ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &wifi_config), kTag, "Set AP config failed");
   ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "Start AP failed");
 
-  ESP_LOGI(kTag, "SoftAP active: ssid=%s password=%s ip=" IPSTR, APP_WIFI_AP_SSID, APP_WIFI_AP_PASSWORD, IP2STR(&ip_info.ip));
+  if (g_ap_netif != nullptr) {
+    const esp_err_t dhcp_start_err = esp_netif_dhcps_start(g_ap_netif);
+    if (dhcp_start_err != ESP_OK && dhcp_start_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED) {
+      ESP_LOGE(kTag, "Starting AP DHCP server failed: %s", esp_err_to_name(dhcp_start_err));
+      return dhcp_start_err;
+    }
+  }
+
+  esp_netif_ip_info_t active_ip_info = {};
+  if (g_ap_netif != nullptr && esp_netif_get_ip_info(g_ap_netif, &active_ip_info) == ESP_OK) {
+    ESP_LOGI(kTag,
+             "SoftAP active: ssid=%s password=%s ip=" IPSTR,
+             APP_WIFI_AP_SSID,
+             APP_WIFI_AP_PASSWORD,
+             IP2STR(&active_ip_info.ip));
+  } else {
+    ESP_LOGI(kTag, "SoftAP active: ssid=%s password=%s ip=" IPSTR, APP_WIFI_AP_SSID, APP_WIFI_AP_PASSWORD, IP2STR(&ip_info.ip));
+  }
   return ESP_OK;
 }

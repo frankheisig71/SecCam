@@ -2,12 +2,27 @@
 
 #include <app_secrets.h>
 
+// Single workspace switch: 1 = setup AP mode, 0 = normal STA mode.
+#ifndef APP_WIFI_IS_AP
+#define APP_WIFI_IS_AP 0
+#endif
+
 // WiFi mode selection.
 #define APP_WIFI_MODE_AP 1
 #define APP_WIFI_MODE_STA 2
 // Select whether the device opens its own AP or joins an existing WLAN.
-#ifndef APP_WIFI_MODE
+#if APP_WIFI_IS_AP
 #define APP_WIFI_MODE APP_WIFI_MODE_AP
+#else
+#define APP_WIFI_MODE APP_WIFI_MODE_STA
+#endif
+
+#if APP_WIFI_MODE == APP_WIFI_MODE_AP
+#define APP_WIFI_AP_SSID "GooUuuu-CAM"
+#define APP_WIFI_AP_PASSWORD "goouuuu123"
+#define APP_WIFI_AP_CHANNEL 1
+#define APP_WIFI_AP_MAX_CLIENTS 4
+#define APP_WIFI_AP_IP_ADDR "192.168.4.1"
 #endif
 
 // Setup mode keeps only AP preview capture and the IR toggle UI.
@@ -18,31 +33,6 @@
 #define APP_SETUP_PREVIEW_INTERVAL_MS 500
 #endif
 
-// Access point assumptions: the module opens its own AP so a browser can connect directly.
-#ifndef APP_WIFI_AP_SSID
-#define APP_WIFI_AP_SSID "GooUuuu-CAM"
-#endif
-#ifndef APP_WIFI_AP_PASSWORD
-#define APP_WIFI_AP_PASSWORD "goouuuu123"
-#endif
-#ifndef APP_WIFI_AP_CHANNEL
-#define APP_WIFI_AP_CHANNEL 6
-#endif
-#ifndef APP_WIFI_AP_MAX_CLIENTS
-#define APP_WIFI_AP_MAX_CLIENTS 4
-#endif
-#ifndef APP_WIFI_AP_IP_ADDR
-#define APP_WIFI_AP_IP_ADDR "192.168.4.1"
-#endif
-
-#if APP_SETUP_PROJECT
-#undef APP_WIFI_AP_SSID
-#define APP_WIFI_AP_SSID "esp32-s3-cam-setup"
-#undef APP_WIFI_AP_PASSWORD
-#define APP_WIFI_AP_PASSWORD "goouuuu123"
-#undef APP_WIFI_AP_IP_ADDR
-#define APP_WIFI_AP_IP_ADDR "192.168.125.1"
-#endif
 
 // Capture cadence and image quality assumptions.
 // No periodic capture: new images are triggered only by PIR, HTTP, or startup.
@@ -63,7 +53,7 @@
 #define APP_CAPTURE_REFERENCE_REFRESH_MS (60 * 1000)
 #define APP_CAPTURE_REFERENCE_IDLE_MS (10 * 1000)
 #ifndef APP_HTTP_SERVER_ENABLED
-#define APP_HTTP_SERVER_ENABLED 1
+#define APP_HTTP_SERVER_ENABLED (APP_SETUP_PROJECT ? 1 : 0)
 #endif
 #ifndef APP_DATASET_COLLECTOR_ENABLED
 #define APP_DATASET_COLLECTOR_ENABLED 1
