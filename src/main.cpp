@@ -524,6 +524,7 @@ esp_err_t perform_capture(const char *reason, uint32_t capture_count, bool deliv
 }
 #endif
 
+#if APP_CAPTURE
 #if APP_HTTP_SERVER_ENABLED
 esp_err_t capture_now_from_http() {
   if (are_triggers_suppressed()) {
@@ -558,8 +559,7 @@ esp_err_t capture_now_from_http() {
   return perform_capture("HTTP request", 1, false);
 #endif
 }
-#endif
-
+#endif //APP_HTTP_SERVER_ENABLED
 void capture_supervisor_task(void *) {
   gpio_config_t io_config = {};
   io_config.pin_bit_mask = 1ULL << APP_CAPTURE_TRIGGER_GPIO;
@@ -588,7 +588,6 @@ void capture_supervisor_task(void *) {
         app_status_led_blink_blue_ms(200);
       }
     }
-
 #if APP_DATASET_COLLECTOR_ENABLED
     if (current_gpio_level == 0 && g_motion_dataset_sequence_count > 0 &&
         (now - last_motion_tick) >= pdMS_TO_TICKS(APP_DATASET_COLLECTOR_MOTION_GUARD_MS)) {
@@ -675,6 +674,7 @@ void capture_supervisor_task(void *) {
     vTaskDelay(pdMS_TO_TICKS(APP_CAPTURE_TRIGGER_POLL_MS));
   }
 }
+#endif //APP_CAPTURE
 
 esp_err_t start_selected_wifi_mode() {
 #if APP_WIFI_MODE == APP_WIFI_MODE_AP
@@ -701,7 +701,7 @@ extern "C" void app_main(void) {
     ESP_LOGE(kTag, "Failed to create capture mutex");
     abort();
   }
-#if APP_SETUP_PROJECT
+#if APP_SETUP
   ESP_ERROR_CHECK(start_selected_wifi_mode());
   ESP_ERROR_CHECK(app_camera_init());
   ESP_ERROR_CHECK(app_ir_led_init());

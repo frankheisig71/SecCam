@@ -70,7 +70,7 @@ void end_image_transfer() {
 
 // Serves the small built-in browser UI for manual capture and image preview.
 esp_err_t root_get_handler(httpd_req_t *req) {
-#if APP_SETUP_PROJECT
+#if APP_SETUP
   static constexpr char kPage[] = R"HTML(
 <!doctype html>
 <html lang="de">
@@ -349,7 +349,7 @@ esp_err_t root_get_handler(httpd_req_t *req) {
   return httpd_resp_send(req, kPage, HTTPD_RESP_USE_STRLEN);
 }
 
-#if APP_SETUP_PROJECT
+#if APP_SETUP
 esp_err_t ir_get_handler(httpd_req_t *req) {
   bool enabled = app_ir_led_is_enabled();
   char query[64] = {};
@@ -614,7 +614,7 @@ esp_err_t app_http_server_start(app_http_capture_request_fn capture_request_fn) 
 
   httpd_uri_t root = {.uri = "/", .method = HTTP_GET, .handler = root_get_handler, .user_ctx = nullptr};
   httpd_uri_t image = {.uri = "/image.jpg", .method = HTTP_GET, .handler = image_get_handler, .user_ctx = nullptr};
-#if APP_SETUP_PROJECT
+#if APP_SETUP
   httpd_uri_t ir = {.uri = "/ir", .method = HTTP_GET, .handler = ir_get_handler, .user_ctx = nullptr};
 #else
   httpd_uri_t status = {.uri = "/status", .method = HTTP_GET, .handler = status_get_handler, .user_ctx = nullptr};
@@ -625,7 +625,7 @@ esp_err_t app_http_server_start(app_http_capture_request_fn capture_request_fn) 
 
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &root), "app_http_server", "Register root failed");
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &image), "app_http_server", "Register image failed");
-#if APP_SETUP_PROJECT
+#if APP_SETUP
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &ir), "app_http_server", "Register IR endpoint failed");
 #else
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &status), "app_http_server", "Register status failed");
