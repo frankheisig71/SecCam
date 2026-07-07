@@ -10,3 +10,4 @@ void app_status_led_blue();
 void app_status_led_yellow();
 void app_status_led_off();
 void app_status_led_blink_blue_ms(uint32_t ms);
+void app_status_led_blink_yellow_ms(uint32_t ms);

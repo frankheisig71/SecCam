@@ -135,6 +135,58 @@ esp_err_t perform_trigger_capture(const char *reason) {
   float best_frame_score = -1.0f;
   int best_index = -1;
 
+#if APP_CAPTURE_IR_LED_SKIP_FRAMES_COUNT > 0
+  // Adaptive IR-LED mode: skip N frames for sensor adaptation, then save the next one.
+  const uint32_t kSkipFrameCount = APP_CAPTURE_IR_LED_SKIP_FRAMES_COUNT;
+  const uint32_t kSaveCycles = APP_CAPTURE_TRIGGER_IR_SAVE_CYCLES;
+  const uint32_t kFramesPerCycle = kSkipFrameCount + 1;
+  const uint32_t kTotalCaptureCount = kFramesPerCycle * kSaveCycles;
+
+  ESP_LOGI(kTag,
+           "Adaptive IR-LED capture: %d cycles, skip %d frames then save 1, total %d captures", 
+           kSaveCycles,
+           kSkipFrameCount,
+           kTotalCaptureCount);
+
+  uint32_t frame_count = 0;
+  uint32_t save_count = 0;
+
+  for (uint32_t attempt = 0; attempt < kTotalCaptureCount; ++attempt) {
+    capture_err = app_camera_capture_now();
+    if (capture_err != ESP_OK) {
+      break;
+    }
+    yield_after_heavy_step();
+
+    const bool should_save_frame = ((attempt + 1) % kFramesPerCycle) == 0;
+    frame_count++;
+
+    if (should_save_frame) {
+      BufferedCaptureImage captured_image = {};
+      const esp_err_t copy_err = copy_latest_into_buffer(&captured_image);
+      if (copy_err != ESP_OK) {
+        capture_err = copy_err;
+        break;
+      }
+      yield_after_heavy_step();
+
+      if (recent_image_count == kAnalyzeFrameCount) {
+        free_buffered_capture_image(&recent_images[0]);
+        recent_images[0] = recent_images[1];
+        recent_images[1] = recent_images[2];
+        recent_images[2] = {};
+        recent_image_count--;
+      }
+
+      recent_images[recent_image_count++] = captured_image;
+      save_count++;
+      ESP_LOGI(kTag, "Saved cycle %d at overall frame %d", save_count, frame_count);
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(APP_CAPTURE_IR_LED_SKIP_INTERVAL_MS));
+    }
+  }
+#else
+  // Standard capture mode: capture frames with timing delays
   const uint32_t total_capture_count = APP_CAPTURE_TRIGGER_BURST_COUNT + APP_CAPTURE_TRIGGER_EXTRA_FRAMES;
   for (uint32_t attempt = 0; attempt < total_capture_count; ++attempt) {
     capture_err = app_camera_capture_now();
@@ -172,6 +224,7 @@ esp_err_t perform_trigger_capture(const char *reason) {
 
     recent_images[recent_image_count++] = captured_image;
   }
+#endif
 
   if (capture_err == ESP_OK && recent_image_count > 0) {
     for (uint32_t index = 0; index < recent_image_count; ++index) {
@@ -226,7 +279,7 @@ esp_err_t perform_trigger_capture(const char *reason) {
   ESP_LOGI(kTag, "IR-LED disabled after capture");
 
   g_last_capture_tick = xTaskGetTickCount();
-  g_trigger_block_until_tick = g_last_capture_tick + pdMS_TO_TICKS(APP_CAPTURE_TRIGGER_SUPPRESSION_MS);
+  g_trigger_block_until_tick = g_last_capture_tick + pdMS_TO_TICKS(APP_CAPTURE_TRIGGER_GUARD_MS);
   g_trigger_processing = false;
 
   const esp_err_t release_err = esp_pm_lock_release(g_cpu_max_lock);
@@ -351,28 +404,56 @@ esp_err_t perform_motion_dataset_batch_capture() {
   ESP_LOGI(kTag, "IR-LED enabled for motion capture batch");
   vTaskDelay(pdMS_TO_TICKS(APP_IR_LED_PRE_CAPTURE_MS));
 
-  const uint32_t batch_capture_count =
-      std::min<uint32_t>(APP_DATASET_COLLECTOR_MOTION_IMAGE_COUNT, remaining_motion_captures);
+  const uint32_t kSkipFrameCount = APP_CAPTURE_IR_LED_SKIP_FRAMES_COUNT;
+  const uint32_t kSaveCycles = APP_CAPTURE_TRIGGER_IR_SAVE_CYCLES;
+  const uint32_t batch_capture_count = std::min<uint32_t>(kSaveCycles, remaining_motion_captures);
   esp_err_t batch_err = ESP_OK;
-  for (uint32_t batch_index = 0; batch_index < batch_capture_count; ++batch_index) {
+  esp_err_t capture_err = ESP_OK;
+
+  ESP_LOGI(kTag,
+           "Motion capture batch: %d cycles, skip %d frames then save 1", 
+           batch_capture_count,
+           kSkipFrameCount);
+
+  for (uint32_t cycle_index = 0; cycle_index < batch_capture_count; ++cycle_index) {
     const uint32_t sequence_index = g_motion_dataset_sequence_count + 1;
-    batch_err = perform_dataset_capture_and_upload(
-        "pir_motion", true, sequence_index, APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES);
-    if (batch_err != ESP_OK) {
-      break;
+    ESP_LOGI(kTag, "Starting motion cycle %d/%d", cycle_index + 1, batch_capture_count);
+
+    for (uint32_t attempt = 0; attempt < (kSkipFrameCount + 1); ++attempt) {
+      capture_err = app_camera_capture_now();
+      if (capture_err != ESP_OK) {
+        batch_err = capture_err;
+        break;
+      }
+      yield_after_heavy_step();
+
+      if (attempt < kSkipFrameCount) {
+        ESP_LOGI(kTag, "Motion cycle %d: skipped frame %d/%d", 
+                 cycle_index + 1,
+                 attempt + 1,
+                 kSkipFrameCount);
+        vTaskDelay(pdMS_TO_TICKS(APP_CAPTURE_IR_LED_SKIP_INTERVAL_MS));
+        continue;
+      }
+
+      batch_err = app_capture_uploader_upload_latest_image(
+          "pir_motion",
+          true,
+          sequence_index,
+          APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES);
+      if (batch_err != ESP_OK) {
+        break;
+      }
+
+      g_motion_dataset_sequence_count = sequence_index;
+      ESP_LOGI(kTag, "Motion cycle %d saved image seq=%u/%u", 
+               cycle_index + 1,
+               sequence_index,
+               APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES);
     }
 
-    g_motion_dataset_sequence_count = sequence_index;
-    if (batch_index + 1 < batch_capture_count) {
-      // Timing between motion captures
-      if (batch_index == 0) {
-        ESP_LOGI(kTag, "First motion image captured, waiting %d ms before second", 
-                 APP_IR_LED_POST_FIRST_CAPTURE_MS);
-        vTaskDelay(pdMS_TO_TICKS(APP_IR_LED_POST_FIRST_CAPTURE_MS));
-      } else {
-        ESP_LOGI(kTag, "Motion image captured, waiting %d ms", APP_DATASET_COLLECTOR_MOTION_IMAGE_SPACING_MS);
-        vTaskDelay(pdMS_TO_TICKS(APP_DATASET_COLLECTOR_MOTION_IMAGE_SPACING_MS));
-      }
+    if (batch_err != ESP_OK) {
+      break;
     }
   }
 
@@ -585,7 +666,7 @@ void capture_supervisor_task(void *) {
       last_motion_tick = now;
       // briefly blink status LED blue on PIR rising edge
       if (last_gpio_level == 0) {
-        app_status_led_blink_blue_ms(200);
+        app_status_led_blink_yellow_ms(200);
       }
     }
 #if APP_DATASET_COLLECTOR_ENABLED

@@ -86,3 +86,20 @@ void app_status_led_blink_blue_ms(uint32_t ms) {
     vTaskDelete(nullptr);
   }, "status_blink", 2048, args, 5, nullptr);
 }
+
+void app_status_led_blink_yellow_ms(uint32_t ms) {
+  // spawn a short task to blink without blocking caller
+  struct BlinkArgs { uint32_t ms; };
+  BlinkArgs *args = (BlinkArgs *)pvPortMalloc(sizeof(BlinkArgs));
+  if (!args) return;
+  args->ms = ms;
+  xTaskCreate([](void *p) {
+    BlinkArgs *a = static_cast<BlinkArgs *>(p);
+    // use a moderated yellow (not full 255) to keep brightness reasonable
+    transmit_color(32, 32, 0);
+    vTaskDelay(pdMS_TO_TICKS(a->ms));
+    app_status_led_off();
+    vPortFree(a);
+    vTaskDelete(nullptr);
+  }, "status_blink_yellow", 2048, args, 5, nullptr);
+}
