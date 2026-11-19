@@ -122,15 +122,22 @@ std::vector<float> resize_rgb_to_model_input(const uint8_t *rgb_data, uint16_t w
     return sample;
   }
 
-  // Edge Impulse exported this impulse with DSP config "Grayscale" and a
-  // 128x96 single-channel input tensor. Passing RGB triplets into the model
-  // corrupts the tensor shape and breaks the original training/preprocessing
-  // contract, which explains why the model behaves sensibly in Studio but not
-  // on the ESP32.
+  const uint32_t src_width = static_cast<uint32_t>(width);
+  const uint32_t src_height = static_cast<uint32_t>(height);
+  const uint32_t crop_size = std::min(src_width, src_height);
+  const uint32_t crop_x = (src_width - crop_size) / 2U;
+  const uint32_t crop_y = (src_height - crop_size) / 2U;
+
+  // EI image DSP expects one packed RGB value (0xRRGGBB) per output pixel.
+  // For 1024x768 this becomes an exact center crop (768x768) before resize.
   for (size_t y = 0; y < model_height; ++y) {
-    const uint32_t src_y = (y * static_cast<size_t>(height)) / model_height;
+    if ((y % 8U) == 0U) {
+      // Keep the idle task alive during larger preprocessing loops.
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    const uint32_t src_y = crop_y + static_cast<uint32_t>((y * crop_size) / model_height);
     for (size_t x = 0; x < model_width; ++x) {
-      const uint32_t src_x = (x * static_cast<size_t>(width)) / model_width;
+      const uint32_t src_x = crop_x + static_cast<uint32_t>((x * crop_size) / model_width);
       const size_t src_offset = (static_cast<size_t>(src_y) * static_cast<size_t>(width) + src_x) * 3U;
       const size_t dst_offset = (y * model_width) + x;
 
@@ -138,13 +145,10 @@ std::vector<float> resize_rgb_to_model_input(const uint8_t *rgb_data, uint16_t w
       const uint8_t g = rgb_data[src_offset + 1U];
       const uint8_t b = rgb_data[src_offset + 2U];
 
-      // Match the exported grayscale preprocessing used by this Edge Impulse
-      // model: luminance from the RGB channels, without changing the model's
-      // expected single-channel layout.
-      const float luminance = 0.299f * static_cast<float>(r) +
-                             0.587f * static_cast<float>(g) +
-                             0.114f * static_cast<float>(b);
-      sample[dst_offset] = luminance;
+      const uint32_t packed_rgb = (static_cast<uint32_t>(r) << 16) |
+                                  (static_cast<uint32_t>(g) << 8) |
+                                  static_cast<uint32_t>(b);
+      sample[dst_offset] = static_cast<float>(packed_rgb);
     }
   }
 
@@ -182,6 +186,8 @@ struct EdgeImpulseEvaluation {
   EdgeImpulseClassification classification = EdgeImpulseClassification::kNotSure;
 };
 
+constexpr float kEdgeImpulseDecisionThreshold = APP_PERSON_SCORE_PERSON_MIN;
+
 EdgeImpulseEvaluation evaluate_edge_impulse_result(const uint8_t *rgb_data, uint16_t width, uint16_t height) {
   EdgeImpulseEvaluation evaluation = {};
 
@@ -195,13 +201,39 @@ EdgeImpulseEvaluation evaluate_edge_impulse_result(const uint8_t *rgb_data, uint
 
 #if defined(EI_CLASSIFIER_INPUT_WIDTH) && defined(EI_CLASSIFIER_INPUT_HEIGHT)
   if (rgb_data != nullptr && width > 0 && height > 0) {
+    ESP_LOGI(kTag,
+             "EI preprocess: raw=%ux%u (%lu bytes RGB), center-crop=%ux%u, resize=%dx%d",
+             static_cast<unsigned>(width),
+             static_cast<unsigned>(height),
+             static_cast<unsigned long>(static_cast<size_t>(width) * static_cast<size_t>(height) * 3U),
+             static_cast<unsigned>(std::min<uint16_t>(width, height)),
+             static_cast<unsigned>(std::min<uint16_t>(width, height)),
+             EI_CLASSIFIER_INPUT_WIDTH,
+             EI_CLASSIFIER_INPUT_HEIGHT);
+
     const std::vector<float> sample = resize_rgb_to_model_input(rgb_data, width, height);
     if (!sample.empty()) {
+#if defined(EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE)
+      if (sample.size() != static_cast<size_t>(EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE)) {
+        ESP_LOGE(kTag,
+                 "EI input size mismatch: sample=%u expected=%u",
+                 static_cast<unsigned>(sample.size()),
+                 static_cast<unsigned>(EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE));
+        return evaluation;
+      }
+#endif
+
       ei::signal_t signal = {};
       signal.total_length = sample.size();
-      signal.get_data = [&sample](size_t offset, size_t length, float *out_ptr) {
+      uint32_t get_data_call_count = 0;
+      signal.get_data = [&sample, &get_data_call_count](size_t offset, size_t length, float *out_ptr) {
         if (out_ptr == nullptr || offset >= sample.size()) {
           return 0;
+        }
+        ++get_data_call_count;
+        if ((get_data_call_count % 16U) == 0U) {
+          // Long EI DSP reads can run for multiple seconds; yield cooperatively.
+          vTaskDelay(pdMS_TO_TICKS(1));
         }
         const size_t copy_len = std::min(length, sample.size() - offset);
         std::copy_n(sample.begin() + static_cast<std::ptrdiff_t>(offset), static_cast<std::ptrdiff_t>(copy_len), out_ptr);
@@ -223,9 +255,9 @@ EdgeImpulseEvaluation evaluate_edge_impulse_result(const uint8_t *rgb_data, uint
           ESP_LOGI(kTag,
             "classification[1]: %s, %f", result.classification[1].label, result.classification[1].value);
           
-          if (evaluation.person_score >= 0.85f) {
+          if (evaluation.person_score >= kEdgeImpulseDecisionThreshold) {
             evaluation.classification = EdgeImpulseClassification::kPerson;
-          } else if (evaluation.no_person_score >= 0.85f) {
+          } else if (evaluation.no_person_score >= kEdgeImpulseDecisionThreshold) {
             evaluation.classification = EdgeImpulseClassification::kNoPerson;
           } else {
             evaluation.classification = EdgeImpulseClassification::kNotSure;
@@ -251,7 +283,24 @@ EdgeImpulseEvaluation evaluate_edge_impulse_result(const uint8_t *rgb_data, uint
 
 void log_edge_impulse_result(float score, EdgeImpulseClassification classification, bool person_present) {
   char evaluation_name[32] = {};
-  std::snprintf(evaluation_name, sizeof(evaluation_name), "CAM_person_%.2f.jpg", score);
+  if (score >= APP_PERSON_SCORE_PERSON_MIN) {
+    std::snprintf(evaluation_name,
+                  sizeof(evaluation_name),
+                  "CAM_%s_%.2f.jpg",
+                  person_present ? "person" : "no_person",
+                  static_cast<double>(score));
+  } else if (score >= APP_PERSON_SCORE_UNSURE_MIN) {
+    std::snprintf(evaluation_name,
+                  sizeof(evaluation_name),
+                  "CAM_unsure+%.2f.jpg",
+                  static_cast<double>(score));
+  } else {
+    std::snprintf(evaluation_name,
+                  sizeof(evaluation_name),
+                  "CAM_%s_%.2f.jpg",
+                  person_present ? "person" : "no_person",
+                  static_cast<double>(score));
+  }
   ESP_LOGI(kTag,
             "Edge Impulse evaluation: %s -> class=%s person=%s score=%.2f",
             evaluation_name,
@@ -543,9 +592,9 @@ esp_err_t analyze_jpeg_image(const uint8_t *jpeg_data,
           edge_impulse_classification_name(edge_result.classification));
 
   // Decision logic:
-  // 1) Binary model with both classes: require a strong class confidence of 0.85.
-  //    - person >= 0.85 => "person"
-  //    - no_person >= 0.85 => "no_person"
+  // 1) Binary model with both classes: require a strong class confidence of 0.75.
+  //    - person >= 0.75 => "person"
+  //    - no_person >= 0.75 => "no_person"
   //    - everything else => "not_sure"
   // 2) Single-class model: we can only report the single available score and label it
   //    as "only_one_classifier" because there is no competing class to compare.

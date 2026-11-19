@@ -1,0 +1,133 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "PlatformIO: Upload to Pi (eval)",
+      "type": "shell",
+      "command": "${env:HOME}/.platformio/penv/bin/platformio",
+      "args": [
+        "run",
+        "-e",
+        "esp32-s3-cam-edge-impulse-eval",
+        "-t",
+        "pi_upload"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "PlatformIO: Build + Upload to Pi (eval)",
+      "type": "shell",
+      "command": "${env:HOME}/.platformio/penv/bin/platformio",
+      "args": [
+        "run",
+        "-e",
+        "esp32-s3-cam-edge-impulse-eval",
+        "-t",
+        "pi_build_upload"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "PlatformIO: Upload to Pi (edge-impulse)",
+      "type": "shell",
+      "command": "${env:HOME}/.platformio/penv/bin/platformio",
+      "args": [
+        "run",
+        "-e",
+        "esp32-s3-cam-edge-impulse",
+        "-t",
+        "pi_upload"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "PlatformIO: Build + Upload to Pi (edge-impulse)",
+      "type": "shell",
+      "command": "${env:HOME}/.platformio/penv/bin/platformio",
+      "args": [
+        "run",
+        "-e",
+        "esp32-s3-cam-edge-impulse",
+        "-t",
+        "pi_build_upload"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "PlatformIO: Upload to Pi (capture)",
+      "type": "shell",
+      "command": "${env:HOME}/.platformio/penv/bin/platformio",
+      "args": [
+        "run",
+        "-e",
+        "esp32-s3-cam-capture",
+        "-t",
+        "pi_upload"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "PlatformIO: Build + Upload to Pi (capture)",
+      "type": "shell",
+      "command": "${env:HOME}/.platformio/penv/bin/platformio",
+      "args": [
+        "run",
+        "-e",
+        "esp32-s3-cam-capture",
+        "-t",
+        "pi_build_upload"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "PlatformIO: Upload to Pi (setup)",
+      "type": "shell",
+      "command": "${env:HOME}/.platformio/penv/bin/platformio",
+      "args": [
+        "run",
+        "-e",
+        "esp32-s3-cam-setup",
+        "-t",
+        "pi_upload"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "PlatformIO: Build + Upload to Pi (setup)",
+      "type": "shell",
+      "command": "${env:HOME}/.platformio/penv/bin/platformio",
+      "args": [
+        "run",
+        "-e",
+        "esp32-s3-cam-setup",
+        "-t",
+        "pi_build_upload"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

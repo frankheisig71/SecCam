@@ -23,8 +23,12 @@ file(GLOB EI_TFLITE_MICRO_PLANNER_SRCS
     "${APP_EDGE_IMPULSE_MODEL_SRC}/edge-impulse-sdk/tensorflow/lite/micro/memory_planner/*.cpp"
 )
 
+file(GLOB EI_MODEL_COMPILED_SRCS
+    "${APP_EDGE_IMPULSE_MODEL_SRC}/tflite-model/*_compiled.cpp"
+)
+
 set(EI_MODEL_SRCS
-    "${APP_EDGE_IMPULSE_MODEL_SRC}/tflite-model/tflite_learn_1095583_4_compiled.cpp"
+    ${EI_MODEL_COMPILED_SRCS}
     "${APP_EDGE_IMPULSE_MODEL_SRC}/edge-impulse-sdk/porting/espressif/ei_classifier_porting.cpp"
 )
 

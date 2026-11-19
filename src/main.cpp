@@ -48,6 +48,26 @@ void yield_after_heavy_step() {
   vTaskDelay(1);
 }
 
+bool is_pir_trigger_stable_active() {
+  const uint32_t sample_interval_ms =
+      APP_PIR_DEBOUNCE_SAMPLE_INTERVAL_MS == 0 ? 1U : APP_PIR_DEBOUNCE_SAMPLE_INTERVAL_MS;
+  const uint32_t sample_count =
+      std::max<uint32_t>(1U, APP_PIR_DEBOUNCE_WINDOW_MS / sample_interval_ms);
+
+  uint32_t active_samples = 0;
+  for (uint32_t sample_index = 0; sample_index < sample_count; ++sample_index) {
+    if (gpio_get_level(APP_CAPTURE_TRIGGER_GPIO) != 0) {
+      active_samples++;
+    }
+
+    if (sample_index + 1U < sample_count) {
+      vTaskDelay(pdMS_TO_TICKS(sample_interval_ms));
+    }
+  }
+
+  return (active_samples * 100U) >= (sample_count * APP_PIR_DEBOUNCE_ACTIVE_PERCENT);
+}
+
 #if APP_WIFI_IS_AP
 void setup_preview_task(void *) {
   while (true) {
@@ -397,10 +417,28 @@ esp_err_t perform_motion_dataset_batch_capture() {
            kSkipFrameCount);
 
   for (uint32_t cycle_index = 0; cycle_index < batch_capture_count; ++cycle_index) {
+    if (app_capture_uploader_should_pause_motion_capture()) {
+      ESP_LOGW(kTag,
+               "Motion batch paused before cycle %u/%u because analysis queue is full",
+               static_cast<unsigned>(cycle_index + 1U),
+               static_cast<unsigned>(batch_capture_count));
+      batch_err = ESP_ERR_TIMEOUT;
+      break;
+    }
+
     const uint32_t sequence_index = g_motion_dataset_sequence_count + 1;
     ESP_LOGI(kTag, "Starting motion cycle %d/%d", cycle_index + 1, batch_capture_count);
 
     for (uint32_t attempt = 0; attempt < (kSkipFrameCount + 1); ++attempt) {
+      if (app_capture_uploader_should_pause_motion_capture()) {
+        ESP_LOGW(kTag,
+                 "Motion batch paused during cycle %u/%u because analysis queue is full",
+                 static_cast<unsigned>(cycle_index + 1U),
+                 static_cast<unsigned>(batch_capture_count));
+        batch_err = ESP_ERR_TIMEOUT;
+        break;
+      }
+
       capture_err = app_camera_capture_now();
       if (capture_err != ESP_OK) {
         batch_err = capture_err;
@@ -409,10 +447,6 @@ esp_err_t perform_motion_dataset_batch_capture() {
       yield_after_heavy_step();
 
       if (attempt < kSkipFrameCount) {
-        ESP_LOGI(kTag, "Motion cycle %d: skipped frame %d/%d", 
-                 cycle_index + 1,
-                 attempt + 1,
-                 kSkipFrameCount);
         vTaskDelay(pdMS_TO_TICKS(APP_CAPTURE_IR_LED_SKIP_INTERVAL_MS));
         continue;
       }
@@ -625,6 +659,7 @@ void capture_supervisor_task(void *) {
   int last_gpio_level = gpio_get_level(APP_CAPTURE_TRIGGER_GPIO);
   TickType_t last_motion_tick = xTaskGetTickCount();
   g_last_idle_dataset_capture_tick = xTaskGetTickCount();
+  bool motion_trigger_armed = (last_gpio_level == 0);
   app_ir_led_set_enabled(last_gpio_level != 0);
 
   while (true) {
@@ -634,10 +669,6 @@ void capture_supervisor_task(void *) {
 
     if (current_gpio_level != 0) {
       last_motion_tick = now;
-      // briefly blink status LED blue on PIR rising edge
-      if (last_gpio_level == 0) {
-        app_status_led_blink_yellow_ms(200);
-      }
     }
 #if APP_DATASET_COLLECTOR_ENABLED
     if (current_gpio_level == 0 && g_motion_dataset_sequence_count > 0 &&
@@ -645,19 +676,45 @@ void capture_supervisor_task(void *) {
       g_motion_dataset_sequence_count = 0;
     }
 
+    if (current_gpio_level == 0) {
+      motion_trigger_armed = true;
+    }
+
+    bool should_refresh_reference_dataset = false;
+    if (current_gpio_level == 0 &&
+        (now - last_motion_tick) >= pdMS_TO_TICKS(APP_CAPTURE_REFERENCE_IDLE_MS) &&
+        (now - g_last_reference_capture_tick) >= pdMS_TO_TICKS(APP_CAPTURE_REFERENCE_REFRESH_MS)) {
+      should_refresh_reference_dataset = true;
+    }
+
+    if (should_refresh_reference_dataset) {
+      const esp_err_t reference_err = refresh_reference_capture();
+      if (reference_err != ESP_OK && reference_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(kTag, "Reference refresh failed: %s", esp_err_to_name(reference_err));
+      }
+    }
+
     bool should_collect_motion = false;
     bool should_collect_idle = false;
-    if (current_gpio_level != 0 && now >= g_motion_dataset_burst_guard_until_tick &&
+    if (current_gpio_level != 0 && motion_trigger_armed &&
+        now >= g_motion_dataset_burst_guard_until_tick &&
         now >= g_motion_dataset_guard_until_tick &&
         !app_capture_uploader_should_pause_motion_capture() &&
         g_motion_dataset_sequence_count < APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES) {
-      should_collect_motion = true;
+      if (is_pir_trigger_stable_active()) {
+        should_collect_motion = true;
+      } else {
+        ESP_LOGI(kTag,
+                 "Ignored unstable PIR trigger: active ratio below %u%%",
+                 static_cast<unsigned>(APP_PIR_DEBOUNCE_ACTIVE_PERCENT));
+      }
     }
     if (current_gpio_level == 0 && now >= g_last_idle_dataset_capture_tick + pdMS_TO_TICKS(APP_DATASET_COLLECTOR_IDLE_INTERVAL_MS)) {
       should_collect_idle = true;
     }
 
     if (should_collect_motion) {
+      motion_trigger_armed = false;
       const esp_err_t capture_err = perform_motion_dataset_batch_capture();
       if (capture_err != ESP_OK) {
         ESP_LOGW(kTag, "Dataset motion capture failed: %s", esp_err_to_name(capture_err));
@@ -687,8 +744,14 @@ void capture_supervisor_task(void *) {
 
     if (last_gpio_level == 0 && current_gpio_level == 1 &&
         (now - g_last_capture_tick) >= pdMS_TO_TICKS(APP_CAPTURE_TRIGGER_COOLDOWN_MS)) {
-      should_capture = true;
-      reason = "GPIO rising edge";
+      if (is_pir_trigger_stable_active()) {
+        should_capture = true;
+        reason = "GPIO rising edge (debounced)";
+      } else {
+        ESP_LOGI(kTag,
+                 "Ignored unstable PIR rising edge: active ratio below %u%%",
+                 static_cast<unsigned>(APP_PIR_DEBOUNCE_ACTIVE_PERCENT));
+      }
     }
 
     if (!should_capture && current_gpio_level == 0 && (now - last_motion_tick) >= pdMS_TO_TICKS(APP_CAPTURE_REFERENCE_IDLE_MS) &&

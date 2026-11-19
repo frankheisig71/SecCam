@@ -81,12 +81,12 @@ def timestamped_detection_filename(file_name: str) -> str:
         stem, suffix = candidate, ""
 
     lower = stem.lower()
-    for label in ("_person_", "_no_person_", "_undefined_"):
-        idx = lower.rfind(label)
-        if idx == -1:
-            continue
+    cam_marker = "cam_"
+    cam_idx = lower.find(cam_marker)
+    if cam_idx != -1:
+        insert_idx = cam_idx + len(cam_marker)
         timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
-        return f"{stem[:idx]}_{timestamp}{stem[idx:]}{suffix}"
+        return f"{stem[:insert_idx]}{timestamp}_{stem[insert_idx:]}{suffix}"
 
     return candidate + suffix
 

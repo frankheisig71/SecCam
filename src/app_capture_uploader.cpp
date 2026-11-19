@@ -1,5 +1,6 @@
 #include "app_capture_uploader.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -42,6 +43,7 @@ TaskHandle_t g_upload_task = nullptr;
 TaskHandle_t g_analysis_task = nullptr;
 esp_pm_lock_handle_t g_cpu_max_lock = nullptr;
 std::atomic<bool> g_analysis_in_progress{false};
+std::atomic<bool> g_analysis_queue_backpressure_active{false};
 std::atomic<uint32_t> g_exhausted_upload_failure_streak{0};
 std::atomic<TickType_t> g_motion_capture_pause_until_tick{0};
 std::atomic<bool> g_failure_reconnect_armed{true};
@@ -106,17 +108,28 @@ void set_capture_file_name(QueuedCaptureUpload *capture,
   // confidence threshold to decide labeling. Otherwise fall back to the
   // provided capture reason.
   if (score >= 0.0f) {
-  #ifdef APP_DATASET_COLLECTOR_LABEL_CONFIDENCE_THRESHOLD
-    const float thresh = APP_DATASET_COLLECTOR_LABEL_CONFIDENCE_THRESHOLD;
-  #else
-    const float thresh = 0.66f;
-  #endif
-    const char *label = nullptr;
-    if (score >= thresh) {
-      label = person_present ? "person" : "no_person";
-    } else {
-      label = "undefined";
+    const float person_thresh = APP_PERSON_SCORE_PERSON_MIN;
+    const float unsure_min_thresh = APP_PERSON_SCORE_UNSURE_MIN;
+
+    if (score >= person_thresh) {
+      const char *label = person_present ? "person" : "no_person";
+      std::snprintf(capture->file_name,
+                    sizeof(capture->file_name),
+                    "CAM_%s_%.2f.jpg",
+                    label,
+                    static_cast<double>(score));
+      return;
     }
+
+    if (score >= unsure_min_thresh) {
+      std::snprintf(capture->file_name,
+                    sizeof(capture->file_name),
+                    "CAM_unsure+%.2f.jpg",
+                    static_cast<double>(score));
+      return;
+    }
+
+    const char *label = person_present ? "person" : "no_person";
     std::snprintf(capture->file_name,
                   sizeof(capture->file_name),
                   "CAM_%s_%.2f.jpg",
@@ -543,13 +556,12 @@ esp_err_t app_capture_uploader_init(esp_pm_lock_handle_t cpu_max_lock) {
   }
 
   if (g_analysis_task == nullptr) {
-    const BaseType_t task_ok = xTaskCreatePinnedToCore(analysis_task,
-                                                      "capture_analysis",
-                                                      APP_DATASET_COLLECTOR_UPLOAD_TASK_STACK_SIZE,
-                                                      nullptr,
-                                                      APP_DATASET_COLLECTOR_UPLOAD_TASK_PRIORITY,
-                                                      &g_analysis_task,
-                                                      1);
+    const BaseType_t task_ok = xTaskCreate(analysis_task,
+                                           "capture_analysis",
+                                           APP_DATASET_COLLECTOR_UPLOAD_TASK_STACK_SIZE,
+                                           nullptr,
+                                           APP_DATASET_COLLECTOR_UPLOAD_TASK_PRIORITY,
+                                           &g_analysis_task);
     if (task_ok != pdPASS) {
       vQueueDelete(g_analysis_queue);
       g_analysis_queue = nullptr;
@@ -602,24 +614,18 @@ esp_err_t app_capture_uploader_enqueue_analysis_image(const char *capture_reason
     return ESP_ERR_INVALID_STATE;
   }
 
-  if (g_analysis_in_progress.load(std::memory_order_acquire)) {
-    ESP_LOGW(kTag,
-             "Skipping queued analysis because another capture is still being processed: reason=%s seq=%u/%u",
-             capture_reason != nullptr ? capture_reason : "unknown",
-             static_cast<unsigned>(sequence_index),
-             static_cast<unsigned>(sequence_size));
-    return ESP_ERR_TIMEOUT;
-  }
-
   const UBaseType_t pending_analysis_count = uxQueueMessagesWaiting(g_analysis_queue);
-  if (pending_analysis_count >= APP_DATASET_COLLECTOR_ANALYSIS_QUEUE_DEPTH) {
+  const UBaseType_t in_flight_count = pending_analysis_count +
+                                      (g_analysis_in_progress.load(std::memory_order_acquire) ? 1U : 0U);
+  if (in_flight_count >= APP_DATASET_COLLECTOR_ANALYSIS_QUEUE_DEPTH) {
     ESP_LOGW(kTag,
              "Skipping queued analysis because the analysis queue is already full: reason=%s seq=%u/%u backlog=%u limit=%u",
              capture_reason != nullptr ? capture_reason : "unknown",
              static_cast<unsigned>(sequence_index),
              static_cast<unsigned>(sequence_size),
-             static_cast<unsigned>(pending_analysis_count),
+             static_cast<unsigned>(in_flight_count),
              static_cast<unsigned>(APP_DATASET_COLLECTOR_ANALYSIS_QUEUE_DEPTH));
+    g_analysis_queue_backpressure_active.store(true, std::memory_order_release);
     return ESP_ERR_TIMEOUT;
   }
 
@@ -716,18 +722,42 @@ esp_err_t app_capture_uploader_upload_latest_image(const char *capture_reason,
 }
 
 bool app_capture_uploader_should_pause_motion_capture() {
+  bool should_pause = false;
+
   const TickType_t pause_until_tick = g_motion_capture_pause_until_tick.load(std::memory_order_relaxed);
-  if (pause_until_tick == 0) {
-    return false;
+  if (pause_until_tick != 0) {
+    const TickType_t now = xTaskGetTickCount();
+    if (now < pause_until_tick) {
+      should_pause = true;
+    } else {
+      g_motion_capture_pause_until_tick.store(0, std::memory_order_relaxed);
+      g_exhausted_upload_failure_streak.store(0, std::memory_order_relaxed);
+      g_failure_reconnect_armed.store(true, std::memory_order_relaxed);
+    }
   }
 
-  const TickType_t now = xTaskGetTickCount();
-  if (now < pause_until_tick) {
-    return true;
+  if (g_analysis_queue != nullptr) {
+    const UBaseType_t pending_count = uxQueueMessagesWaiting(g_analysis_queue);
+    const UBaseType_t in_flight_count = pending_count +
+                                        (g_analysis_in_progress.load(std::memory_order_acquire) ? 1U : 0U);
+    const UBaseType_t queue_depth = static_cast<UBaseType_t>(APP_DATASET_COLLECTOR_ANALYSIS_QUEUE_DEPTH);
+    const UBaseType_t free_slots = in_flight_count >= queue_depth ? 0U : (queue_depth - in_flight_count);
+    const UBaseType_t resume_free_slots = std::min<UBaseType_t>(
+        static_cast<UBaseType_t>(APP_DATASET_COLLECTOR_ANALYSIS_QUEUE_RESUME_FREE_SLOTS),
+        queue_depth);
+
+    const bool currently_paused = g_analysis_queue_backpressure_active.load(std::memory_order_acquire);
+    if (currently_paused) {
+      if (free_slots >= resume_free_slots) {
+        g_analysis_queue_backpressure_active.store(false, std::memory_order_release);
+      } else {
+        should_pause = true;
+      }
+    } else if (free_slots == 0U) {
+      g_analysis_queue_backpressure_active.store(true, std::memory_order_release);
+      should_pause = true;
+    }
   }
 
-  g_motion_capture_pause_until_tick.store(0, std::memory_order_relaxed);
-  g_exhausted_upload_failure_streak.store(0, std::memory_order_relaxed);
-  g_failure_reconnect_armed.store(true, std::memory_order_relaxed);
-  return false;
+  return should_pause;
 }

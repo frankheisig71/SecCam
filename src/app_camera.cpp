@@ -156,12 +156,6 @@ esp_err_t capture_into_ram() {
   g_latest_image.width = frame_width;
   g_latest_image.height = frame_height;
   xSemaphoreGive(g_latest_image.mutex);
-
-  ESP_LOGI(kTag,
-           "Stored JPEG in RAM (%u bytes, using frame %d/%d)",
-           static_cast<unsigned>(frame_len),
-           APP_CAMERA_TRIGGER_FRAMES,
-           APP_CAMERA_TRIGGER_FRAMES);
   return ESP_OK;
 }
 

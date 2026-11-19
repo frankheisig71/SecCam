@@ -4,6 +4,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 from configparser import ConfigParser
 from pathlib import Path
 
@@ -125,20 +126,7 @@ def _dry_run(label, command):
     return False
 
 
-def pi_upload_action(target, source, env):
-    project_dir = env["PROJECT_DIR"]
-    env_name = env.get("PIOENV") or env.get("ENV")
-    build_cmd = ["platformio", "run"]
-    if env_name:
-        build_cmd.extend(["--environment", env_name])
-    print(f"[remote_pi] Building firmware for environment '{env_name or 'default'}' before remote upload")
-    if _dry_run("local build", " ".join(shlex.quote(part) for part in build_cmd)):
-        pass
-    else:
-        result = subprocess.run(build_cmd, cwd=project_dir, check=False)
-        if result.returncode != 0:
-            raise RuntimeError("Local PlatformIO build failed")
-
+def _upload_artifacts_to_pi(env):
     cfg = _remote_cfg(env)
     artifacts = _find_upload_artifacts(env)
 
@@ -187,11 +175,39 @@ def pi_upload_action(target, source, env):
     return 0
 
 
+def pi_upload_action(target, source, env):
+    print("[remote_pi] Upload-only mode: using existing local build artifacts")
+    return _upload_artifacts_to_pi(env)
+
+
+def pi_build_upload_action(target, source, env):
+    project_dir = env["PROJECT_DIR"]
+    env_name = env.get("PIOENV") or env.get("ENV")
+    build_cmd = [sys.executable, "-m", "platformio", "run"]
+    if env_name:
+        build_cmd.extend(["--environment", env_name])
+    print(f"[remote_pi] Building firmware for environment '{env_name or 'default'}' before remote upload")
+    if _dry_run("local build", " ".join(shlex.quote(part) for part in build_cmd)):
+        return _upload_artifacts_to_pi(env)
+
+    result = subprocess.run(build_cmd, cwd=project_dir, check=False)
+    if result.returncode != 0:
+        raise RuntimeError("Local PlatformIO build failed")
+
+    return _upload_artifacts_to_pi(env)
+
+
 def generate(env):
     env.AddCustomTarget(
         "pi_upload",
         None,
         pi_upload_action,
+        "Upload to Pi",
+    )
+    env.AddCustomTarget(
+        "pi_build_upload",
+        None,
+        pi_build_upload_action,
         "Build + Upload to Pi",
     )
 
