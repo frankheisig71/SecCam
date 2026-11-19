@@ -68,6 +68,60 @@ def next_capture_filename(capture_mode: str) -> str:
             file_name = f"{prefix}CAM_{now:%y%m%d_%H%M%S}_{now.microsecond // 1000:03d}.jpg"
             return file_name
 
+
+def timestamped_detection_filename(file_name: str) -> str:
+    candidate = Path(file_name).name.strip()
+    if not candidate or candidate in {".", ".."}:
+        return candidate
+
+    if "." in candidate:
+        stem, suffix = candidate.rsplit(".", 1)
+        suffix = f".{suffix}"
+    else:
+        stem, suffix = candidate, ""
+
+    lower = stem.lower()
+    for label in ("_person_", "_no_person_", "_undefined_"):
+        idx = lower.rfind(label)
+        if idx == -1:
+            continue
+        timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+        return f"{stem[:idx]}_{timestamp}{stem[idx:]}{suffix}"
+
+    return candidate + suffix
+
+
+def requested_capture_name(headers) -> str | None:
+    candidates = [
+        header_value(headers, "X-Original-Filename", ""),
+        header_value(headers, "X-File-Name", ""),
+        header_value(headers, "X-Filename", ""),
+        "",
+    ]
+
+    content_disposition = header_value(headers, "Content-Disposition", "")
+    if content_disposition:
+        parts = [part.strip() for part in content_disposition.split(";")]
+        for part in parts:
+            if part.lower().startswith("filename="):
+                candidates.append(part.split("=", 1)[1].strip('"'))
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = Path(candidate.split("?", 1)[0]).name
+        normalized = normalized.strip()
+        if not normalized or normalized in {".", ".."}:
+            continue
+        lowered = normalized.lower()
+        if "_person_" not in lowered and "_no_person_" not in lowered:
+            continue
+        if not lowered.endswith(".jpg"):
+            normalized = f"{normalized}.jpg"
+        return timestamped_detection_filename(normalized)
+    return None
+
+
 def load_config(path: str) -> dict:
     cfg = configparser.ConfigParser()
 
@@ -103,7 +157,7 @@ def build_capture_paths(output_root: Path, headers) -> tuple[Path, Path, dict[st
     sequence_index = integer_header(headers, "X-Sequence-Index", 1)
     sequence_size = integer_header(headers, "X-Sequence-Size", 1)
 
-    file_name = next_capture_filename(capture_mode)
+    file_name = requested_capture_name(headers) or next_capture_filename(capture_mode)
     image_path = output_root / file_name
     metadata_path = output_root / file_name.replace(".jpg", ".json")
     metadata = {
@@ -305,6 +359,9 @@ class CaptureHandler(BaseHTTPRequestHandler):
 
         payload = self.rfile.read(content_length)
         target_path, metadata_path, metadata = build_capture_paths(self.output_dir, self.headers)
+        LOGGER.debug("received capture payload: %s (header filename=%s)",
+                    target_path.name,
+                    header_value(self.headers, "X-Original-Filename", "<none>"))
 
         try:
             capture_queue.put_nowait((payload, target_path, metadata_path, metadata))

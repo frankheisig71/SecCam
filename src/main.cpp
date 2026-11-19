@@ -10,9 +10,9 @@
 #include "app_wifi_sta.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
-#include "esp_log.h"
 #include "esp_pm.h"
 #include "app_status_led.h"
+#include "app_logging.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -109,7 +109,7 @@ esp_err_t perform_trigger_capture(const char *reason) {
   }
 
   g_trigger_processing = true;
-  ESP_LOGI(kTag, "Capture triggered by %s", reason);
+  APP_LOG_PIR_TRIGGER(kTag, reason);
 
   const esp_err_t acquire_err = esp_pm_lock_acquire(g_cpu_max_lock);
   if (acquire_err != ESP_OK) {
@@ -131,9 +131,8 @@ esp_err_t perform_trigger_capture(const char *reason) {
   constexpr uint32_t kAnalyzeFrameCount = APP_CAPTURE_TRIGGER_ANALYZE_FRAMES;
   BufferedCaptureImage recent_images[kAnalyzeFrameCount] = {};
   uint32_t recent_image_count = 0;
-  app_person_detection_status_t best_status = {};
-  float best_frame_score = -1.0f;
-  int best_index = -1;
+  uint32_t total_capture_attempts = 0;
+  uint32_t saved_frame_count = 0;
 
 #if APP_CAPTURE_IR_LED_SKIP_FRAMES_COUNT > 0
   // Adaptive IR-LED mode: skip N frames for sensor adaptation, then save the next one.
@@ -160,6 +159,7 @@ esp_err_t perform_trigger_capture(const char *reason) {
 
     const bool should_save_frame = ((attempt + 1) % kFramesPerCycle) == 0;
     frame_count++;
+    total_capture_attempts++;
 
     if (should_save_frame) {
       BufferedCaptureImage captured_image = {};
@@ -180,7 +180,7 @@ esp_err_t perform_trigger_capture(const char *reason) {
 
       recent_images[recent_image_count++] = captured_image;
       save_count++;
-      ESP_LOGI(kTag, "Saved cycle %d at overall frame %d", save_count, frame_count);
+      saved_frame_count++;
     } else {
       vTaskDelay(pdMS_TO_TICKS(APP_CAPTURE_IR_LED_SKIP_INTERVAL_MS));
     }
@@ -203,14 +203,10 @@ esp_err_t perform_trigger_capture(const char *reason) {
     }
     yield_after_heavy_step();
 
-    // IR-LED timing: wait after first capture, longer after second
+    // IR-LED timing: keep the 5-frame burst for camera adaptation, but avoid noisy per-frame logs.
     if (attempt == 0) {
-      ESP_LOGI(kTag, "First image captured, waiting %d ms before second image", 
-               APP_IR_LED_POST_FIRST_CAPTURE_MS);
       vTaskDelay(pdMS_TO_TICKS(APP_IR_LED_POST_FIRST_CAPTURE_MS));
     } else if (attempt == 1) {
-      ESP_LOGI(kTag, "Second image captured, waiting %d ms before final processing", 
-               APP_IR_LED_POST_SECOND_CAPTURE_MS);
       vTaskDelay(pdMS_TO_TICKS(APP_IR_LED_POST_SECOND_CAPTURE_MS));
     }
 
@@ -223,33 +219,18 @@ esp_err_t perform_trigger_capture(const char *reason) {
     }
 
     recent_images[recent_image_count++] = captured_image;
+    total_capture_attempts++;
+    saved_frame_count++;
   }
 #endif
 
   if (capture_err == ESP_OK && recent_image_count > 0) {
-    for (uint32_t index = 0; index < recent_image_count; ++index) {
-      app_person_detection_status_t candidate_status = {};
-      float candidate_score = 0.0f;
-      detect_err = app_person_detect_analyze_jpeg_image(recent_images[index].data,
-                                                        recent_images[index].size,
-                                                        recent_images[index].width,
-                                                        recent_images[index].height,
-                                                        &candidate_status,
-                                                        &candidate_score);
-      yield_after_heavy_step();
-      if (detect_err != ESP_OK) {
-        break;
-      }
-
-      if (candidate_score > best_frame_score) {
-        best_frame_score = candidate_score;
-        best_status = candidate_status;
-        best_index = static_cast<int>(index);
-      }
-    }
-  }
-
-  if (capture_err == ESP_OK && detect_err == ESP_OK && best_index >= 0) {
+    ESP_LOGI(kTag,
+             "Capture cycle complete: attempts=%u saved=%u recent=%u, selected latest image for upload",
+             total_capture_attempts,
+             saved_frame_count,
+             recent_image_count);
+    const uint32_t best_index = recent_image_count - 1;
     BufferedCaptureImage &best_image = recent_images[best_index];
     const esp_err_t replace_err = app_camera_replace_latest_image(best_image.data,
                                                                   best_image.size,
@@ -263,9 +244,9 @@ esp_err_t perform_trigger_capture(const char *reason) {
       yield_after_heavy_step();
       best_image.data = nullptr;
       best_image.size = 0;
-      const esp_err_t status_err = app_person_detect_set_status(&best_status);
-      if (status_err != ESP_OK) {
-        detect_err = status_err;
+      const esp_err_t queue_err = app_capture_uploader_enqueue_analysis_image(reason, true, 1, 1);
+      if (queue_err != ESP_OK) {
+        capture_err = queue_err;
       }
     }
   }
@@ -375,7 +356,7 @@ esp_err_t perform_dataset_capture_and_upload(const char *reason,
   esp_err_t capture_err = app_camera_capture_now();
   if (capture_err == ESP_OK) {
     yield_after_heavy_step();
-    capture_err = app_capture_uploader_upload_latest_image(reason, motion_capture, sequence_index, sequence_size);
+    capture_err = app_capture_uploader_enqueue_analysis_image(reason, motion_capture, sequence_index, sequence_size);
   }
 
   const esp_err_t release_err = esp_pm_lock_release(g_cpu_max_lock);
@@ -436,11 +417,10 @@ esp_err_t perform_motion_dataset_batch_capture() {
         continue;
       }
 
-      batch_err = app_capture_uploader_upload_latest_image(
-          "pir_motion",
-          true,
-          sequence_index,
-          APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES);
+      batch_err = app_capture_uploader_enqueue_analysis_image("motion",
+                                                             true,
+                                                             sequence_index,
+                                                             APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES);
       if (batch_err != ESP_OK) {
         break;
       }
@@ -523,25 +503,11 @@ esp_err_t perform_capture(const char *reason, uint32_t capture_count, bool deliv
   int64_t best_captured_at_us = 0;
   uint16_t best_width = 0;
   uint16_t best_height = 0;
-  float best_frame_score = -1.0f;
-  app_person_detection_status_t best_status = {};
-
   const uint32_t effective_capture_count = capture_count == 0 ? 1 : capture_count;
   for (uint32_t attempt = 0; attempt < effective_capture_count; ++attempt) {
     capture_err = app_camera_capture_now();
     if (capture_err != ESP_OK) {
       break;
-    }
-
-    app_person_detection_status_t detection_status = {};
-    float frame_score = 0.0f;
-    detect_err = app_person_detect_analyze_latest_image_with_result(&detection_status, &frame_score);
-    if (detect_err != ESP_OK) {
-      break;
-    }
-
-    if (!deliver_best_frame || frame_score <= best_frame_score) {
-      continue;
     }
 
     uint8_t *candidate_image = nullptr;
@@ -560,14 +526,17 @@ esp_err_t perform_capture(const char *reason, uint32_t capture_count, bool deliv
       break;
     }
 
+    if (!deliver_best_frame) {
+      app_camera_free_image_copy(candidate_image);
+      continue;
+    }
+
     app_camera_free_image_copy(best_image);
     best_image = candidate_image;
     best_image_size = candidate_size;
     best_captured_at_us = candidate_captured_at_us;
     best_width = candidate_width;
     best_height = candidate_height;
-    best_frame_score = frame_score;
-    best_status = detection_status;
   }
 
   if (capture_err == ESP_OK && deliver_best_frame && best_image != nullptr) {
@@ -578,9 +547,9 @@ esp_err_t perform_capture(const char *reason, uint32_t capture_count, bool deliv
       capture_err = replace_err;
     } else {
       best_image = nullptr;
-      const esp_err_t status_err = app_person_detect_set_status(&best_status);
-      if (status_err != ESP_OK) {
-        detect_err = status_err;
+      const esp_err_t queue_err = app_capture_uploader_enqueue_analysis_image(reason, false, 1, 1);
+      if (queue_err != ESP_OK) {
+        capture_err = queue_err;
       }
     }
   }
@@ -655,6 +624,7 @@ void capture_supervisor_task(void *) {
 
   int last_gpio_level = gpio_get_level(APP_CAPTURE_TRIGGER_GPIO);
   TickType_t last_motion_tick = xTaskGetTickCount();
+  g_last_idle_dataset_capture_tick = xTaskGetTickCount();
   app_ir_led_set_enabled(last_gpio_level != 0);
 
   while (true) {
@@ -697,11 +667,11 @@ void capture_supervisor_task(void *) {
     }
 
     if (should_collect_idle) {
+      const TickType_t idle_capture_tick = now;
       const esp_err_t capture_err = perform_dataset_capture_and_upload("idle_interval", false, 1, 1);
+      g_last_idle_dataset_capture_tick = idle_capture_tick;
       if (capture_err != ESP_OK) {
         ESP_LOGW(kTag, "Dataset idle capture failed: %s", esp_err_to_name(capture_err));
-      } else {
-        g_last_idle_dataset_capture_tick = now;
       }
       vTaskDelay(pdMS_TO_TICKS(APP_CAPTURE_TRIGGER_POLL_MS));
       continue;

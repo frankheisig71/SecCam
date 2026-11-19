@@ -18,18 +18,20 @@ Die Firmware ist fuer PlatformIO mit ESP-IDF aufgebaut.
 - periodische Aufnahme im Sekundenbereich
 - externer Hardware-Trigger ueber GPIO 21 auf steigender Flanke
 - gemeinsame Cooldown-Zeit fuer alle Triggerquellen
-- probabilistische Personenerkennung ueber Espressif `pedestrian_detect`
+- probabilistische Personenerkennung ueber Edge-Impulse-Modell bzw. optionales ESP32-Modell
 - letztes JPEG ausschliesslich im RAM, kein Filesystem und kein Live-Stream
 
 ## Projektstruktur
 
-- `src/main.cpp`: zentrale Orchestrierung, Triggerlogik, Power-Management, Startreihenfolge
-- `src/app_camera.cpp`: Kamerainit, Aufnahme und RAM-Pufferverwaltung
+- `src/main.cpp`: zentrale Orchestrierung, Supervisor-/Triggerlogik, Guardzeiten, Burst- und Idle-Capture-Flow, Power-Management
+- `src/app_camera.cpp`: Kamerainit, Aufnahme, JPEG-Erzeugung und RAM-Pufferverwaltung
+- `src/app_capture_uploader.cpp`: Queue-basierter Upload-Pfad, Analyse-Queue, Upload-Worker, Dateinamen und Retry-Logik
+- `include/app_capture_uploader.h`: API fuer Analyse- und Upload-Queue
 - `src/app_wifi_ap.cpp`: SoftAP-Modus
 - `src/app_wifi_sta.cpp`: Station-Modus mit Reconnect und IP-Logging
 - `src/app_http_server.cpp`: Browser-UI und HTTP-Endpunkte
-- `src/app_person_detect.cpp`: Personenerkennung und Statusverwaltung
-- `include/app_config.h`: zentrale Defines fuer WLAN, Trigger, CPU-Frequenz und Kamerapins
+- `src/app_person_detect.cpp`: Modellauswertung, Statusverwaltung, Edge-Impulse-/Person-Scoring und Motion-Referenz
+- `include/app_config.h`: zentrale Defines fuer WLAN, Trigger, CPU-Frequenz, Dataset-Collector und Kamerapins
 - `HTTP_API.md`: Endpunkt-Dokumentation
 
 ## Voraussetzungen
@@ -164,6 +166,28 @@ Alle Triggerquellen laufen ueber denselben zentralen Capture-Pfad in `main.cpp`.
 Dadurch gelten Mutex, Cooldown und CPU-Taktumschaltung fuer Start, Timer, GPIO und HTTP identisch.
 Der Capture-Pfad fuehrt zuerst die Personenerkennung auf dem RGB565-Frame aus und speichert danach ein JPEG fuer den Browser im RAM.
 
+## Bewegungs-, Analyse- und Upload-Ablauf (aktuelle Logik)
+
+Der Triggerpfad ist bewusst als einfache Zustandsmaschine aufgebaut und nicht als GPIO-Interrupt-Handler. In `capture_supervisor_task()` in `src/main.cpp` wird der PIR-Pin mit einer kurzen Poll-Periode (`APP_CAPTURE_TRIGGER_POLL_MS`) abgefragt. Wenn der GPIO-Wert auf HIGH steht und die Guard-/Cooldown-Fenster passen, startet der Motion-/Dataset-Pfad.
+
+Die aktuelle Reihenfolge ist grob:
+
+1. Supervisor erkennt Bewegung am PIR-GPIO und prueft Guard-/Cooldown-Fenster.
+2. `perform_motion_dataset_batch_capture()` bzw. `perform_dataset_capture_and_upload()` startet den passenden Capture-Pfad.
+3. `main.cpp` nimmt mehrere Bilder in kurzer Folge auf und sammelt sie in einem lokalen Puffer.
+4. Das eigentliche Modell-Scoring laeuft nicht mehr inline im Supervisor-Task, sondern wird asynchron ueber eine separate Analyse-Queue abgearbeitet.
+5. `app_capture_uploader_enqueue_analysis_image()` kopiert das aktuelle JPEG in einen Queue-Eintrag und stellt es in `app_capture_uploader.cpp` in die `g_analysis_queue`.
+6. `analysis_task()` nimmt die Bilder aus der Analyse-Queue, ruft `app_person_detect_analyze_jpeg_image(...)` auf und bestimmt `person_present` sowie `score`.
+7. Danach wird nur noch das bereits klassifizierte Bild in die Upload-Queue weitergereicht.
+8. Ein separater Upload-Task verarbeitet die Upload-Queue und schickt das JPEG an den Collector mit Retry-/Backoff-Mechanik.
+9. Beim Setzen des Dateinamens wird das Klassifikationsergebnis bevorzugt, also z. B. `CAM_person_0.67.jpg` oder `CAM_no_person_0.12.jpg`.
+
+Diese Trennung ist wichtig, damit die asynchronen, rechenintensiven Schritte nicht mehr im Trigger-/Supervisor-Task laufen. Der Supervisor bleibt damit reaktionsschnell und der Watchdog verschiebt die schwere Arbeit in die dedizierte Analyse-Queue.
+
+Wichtig: Das System speichert nicht "alle Bilder als Datei"; der typische Ablauf ist vielmehr: Bewegung erkannt -> kurzer Burst -> Bilder im RAM puffern -> Analyse in eigener Queue -> nur das klassifizierte Bild wird nach Upload weitergereicht. Das macht den Ablauf fuer den ESP32-S3 robust und reduziert RAM/Flash deutlich.
+
+Der Idle-/Dataset-Pfad laeuft parallel dazu. Wenn kein PIR aktiv ist, kann in festen Intervallen ebenfalls ein Bild aufgenommen und via Analyse-/Upload-Queue verarbeitet werden (`APP_DATASET_COLLECTOR_IDLE_INTERVAL_MS`). Dadurch ist die App nicht rein "PIR-only"; sie kann in beiden Modi bei Bedarf Bilder erzeugen.
+
 ## HTTP-Schnittstelle
 
 Kurzuebersicht:
@@ -177,11 +201,13 @@ Details und Beispielantworten stehen in `HTTP_API.md`.
 
 ## Architekturhinweise
 
-- Das Projekt speichert bewusst nur genau ein Bild im RAM.
+- `main.cpp` bleibt der orchestrierende Einstiegspunkt: Trigger, Cooldown, Guardzeiten, Datensammelpfad und Ablaufsteuerung liegen dort zusammen.
+- `app_camera.cpp` ist die reine Kamera-/Puffer-Schicht: Init, Capture, JPEG-Conversion und RAM-Verwaltung.
+- `app_person_detect.cpp` kapselt die Modell- und Statuslogik: Edge-Impulse-/RGB-Auswertung, Score-Berechnung, Motion-Reference und Statushaltung.
+- `app_capture_uploader.cpp` kapselt den I/O-/Transport-Pfad: Analyse-Queue, Upload-Queue, HTTP-POST, Dateinamen und Retry/Backoff.
 - Es gibt absichtlich keinen MJPEG-Stream und keine Dateiablage.
-- Die Capture-Logik ist zentralisiert, damit Triggerquellen nicht auseinanderlaufen.
 - Die HTTP-Schicht bleibt duenn und delegiert Sofortaufnahmen ueber Callback an die Hauptlogik.
-- Fuer die KI wird direkt auf dem aufgenommenen RGB565-Frame inferiert; das Browser-Bild wird anschliessend separat als JPEG erzeugt.
+- Die schwere Bildanalyse wurde bewusst aus dem Supervisor-Task herausgezogen, damit Trigger-Polling und Camera-Flow stabil bleiben.
 - Die Personenerkennung ist auf `Person wahrscheinlich vorhanden ja/nein` reduziert, um den ESP32-S3 nicht mit unnoetig breiten Klassifikationsaufgaben zu ueberladen.
 
 ## Offene Annahmen

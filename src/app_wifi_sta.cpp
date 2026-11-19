@@ -5,7 +5,7 @@
 #include "app_config.h"
 #include "esp_check.h"
 #include "esp_event.h"
-#include "esp_log.h"
+#include "app_logging.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -17,12 +17,20 @@ namespace {
 
 constexpr char kTag[] = "app_wifi_sta";
 constexpr TickType_t kReconnectRetryDelay = pdMS_TO_TICKS(250);
+constexpr TickType_t kTxPowerAdjustInterval = pdMS_TO_TICKS(5000);  // Check every 5s
+constexpr int8_t kRssiThresholdClose = -50;      // Too close: reduce TX power
+constexpr int8_t kRssiThresholdFar = -75;        // Too far: increase TX power
+constexpr uint8_t kTxPowerHigh = 82;             // Max: 20.5 dBm
+constexpr uint8_t kTxPowerMedium = 60;           // ~15 dBm
+constexpr uint8_t kTxPowerLow = 44;              // ~11 dBm
 bool g_handlers_registered = false;
 esp_netif_t *g_sta_netif = nullptr;
 TaskHandle_t g_connect_task = nullptr;
+TaskHandle_t g_tx_power_monitor_task = nullptr;
 std::atomic<bool> g_sta_busy{false};
 std::atomic<bool> g_connect_requested{false};
 std::atomic<bool> g_sta_connecting{false};
+std::atomic<uint8_t> g_current_tx_power{kTxPowerHigh};
 
 void request_sta_connect() {
   g_sta_busy.store(true, std::memory_order_relaxed);
@@ -96,6 +104,45 @@ const char *wifi_disconnect_reason_name(uint8_t reason) {
   }
 }
 
+void adjust_tx_power_by_rssi(int8_t rssi) {
+  uint8_t new_tx_power = g_current_tx_power.load(std::memory_order_relaxed);
+  
+  if (rssi > kRssiThresholdClose) {
+    // Signal very strong (too close): reduce TX power
+    new_tx_power = kTxPowerLow;
+  } else if (rssi > kRssiThresholdFar) {
+    // Signal good: medium power
+    new_tx_power = kTxPowerMedium;
+  } else {
+    // Signal weak (too far): full power
+    new_tx_power = kTxPowerHigh;
+  }
+  
+  const uint8_t current = g_current_tx_power.load(std::memory_order_relaxed);
+  if (new_tx_power != current) {
+    const esp_err_t err = esp_wifi_set_max_tx_power(new_tx_power);
+    if (err == ESP_OK) {
+      g_current_tx_power.store(new_tx_power, std::memory_order_relaxed);
+      ESP_LOGI(kTag, "TX power adjusted: rssi=%d dBm -> power=%u (%.1f dBm)", 
+               rssi, new_tx_power, new_tx_power * 0.25f);
+    } else {
+      ESP_LOGW(kTag, "Failed to adjust TX power: %s", esp_err_to_name(err));
+    }
+  }
+}
+
+void tx_power_monitor_task(void *) {
+  while (true) {
+    vTaskDelay(kTxPowerAdjustInterval);
+    
+    // Only adjust if connected
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+      adjust_tx_power_by_rssi(ap_info.rssi);
+    }
+  }
+}
+
 void on_wifi_event(void *, esp_event_base_t event_base, int32_t event_id, void *event_data) {
   if (event_base != WIFI_EVENT) {
     return;
@@ -143,6 +190,17 @@ void on_ip_event(void *, esp_event_base_t event_base, int32_t event_id, void *ev
            IP2STR(&got_ip->ip_info.ip),
            IP2STR(&got_ip->ip_info.netmask),
            IP2STR(&got_ip->ip_info.gw));
+  
+  // Start TX power monitor if not already running
+  if (g_tx_power_monitor_task == nullptr) {
+    const BaseType_t task_ok = xTaskCreate(tx_power_monitor_task, "wifi_tx_monitor", 2048, nullptr, 3, &g_tx_power_monitor_task);
+    if (task_ok == pdPASS) {
+      ESP_LOGI(kTag, "TX power monitor task started");
+    } else {
+      ESP_LOGW(kTag, "Failed to start TX power monitor task");
+      g_tx_power_monitor_task = nullptr;
+    }
+  }
 }
 
 esp_err_t ensure_wifi_stack() {
@@ -198,10 +256,11 @@ esp_err_t app_wifi_sta_start() {
   wifi_config_t wifi_config = {};
   std::memcpy(wifi_config.sta.ssid, APP_WIFI_STA_SSID, sizeof(APP_WIFI_STA_SSID) - 1);
   std::memcpy(wifi_config.sta.password, APP_WIFI_STA_PASSWORD, sizeof(APP_WIFI_STA_PASSWORD) - 1);
-  wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+  wifi_config.sta.scan_method = WIFI_FAST_SCAN;  // Schneller Scan statt All-Channel
   wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
   wifi_config.sta.failure_retry_cnt = 5;
   wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+  wifi_config.sta.threshold.rssi = -70;  // Nur gutes Signal akzeptieren (nicht zu nah!)
   wifi_config.sta.pmf_cfg.capable = true;
   wifi_config.sta.pmf_cfg.required = false;
 

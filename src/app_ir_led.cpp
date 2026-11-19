@@ -3,7 +3,7 @@
 #include "app_config.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
-#include "esp_log.h"
+#include "app_logging.h"
 
 namespace {
 

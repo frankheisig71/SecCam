@@ -14,4 +14,11 @@ doc
 
 include/app_secrets.h
 
+
 test/*output.txt
+*.JPG
+*.ppm
+*.jpg
+*.pgm
+*.png
+__pycache__

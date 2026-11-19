@@ -2,7 +2,7 @@
 
 #include "app_config.h"
 #include "esp_check.h"
-#include "esp_log.h"
+#include "app_logging.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_common.h"
@@ -84,7 +84,7 @@ void app_status_led_blink_blue_ms(uint32_t ms) {
     app_status_led_off();
     vPortFree(a);
     vTaskDelete(nullptr);
-  }, "status_blink", 2048, args, 5, nullptr);
+  }, "blink_blue", 4096, args, 5, nullptr);
 }
 
 void app_status_led_blink_yellow_ms(uint32_t ms) {
@@ -101,5 +101,5 @@ void app_status_led_blink_yellow_ms(uint32_t ms) {
     app_status_led_off();
     vPortFree(a);
     vTaskDelete(nullptr);
-  }, "status_blink_yellow", 2048, args, 5, nullptr);
+  }, "blink_yellow", 4096, args, 5, nullptr);
 }

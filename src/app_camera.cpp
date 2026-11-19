@@ -7,7 +7,7 @@
 #include "esp_camera.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
-#include "esp_log.h"
+#include "app_logging.h"
 #include "esp_psram.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"

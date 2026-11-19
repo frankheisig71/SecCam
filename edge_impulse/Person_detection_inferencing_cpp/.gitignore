@@ -1,0 +1,9 @@
+build/
+test/
+tflite-model/
+model-parameters/
+local_eval/
+edge-impulse-sdk/
+*.pgm
+*.ppm
+*.bin

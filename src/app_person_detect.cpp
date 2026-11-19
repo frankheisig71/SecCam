@@ -2,26 +2,39 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <new>
+#include <vector>
 
 #include "app_camera.h"
 #include "app_config.h"
 #include "dl_detect_base.hpp"
 #include "dl_image_define.hpp"
-#include "esp_log.h"
+#include "app_logging.h"
 #include "esp_heap_caps.h"
-#include "esp_partition.h"
 #include "esp_psram.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "img_converters.h"
-#if APP_PERSON_DETECT_HAS_CLASSIFIER && APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_COCO_320
-#include "coco_detect.hpp"
-#elif APP_PERSON_DETECT_HAS_CLASSIFIER && APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_PEDESTRIAN
-#include "pedestrian_detect.hpp"
+
+#if __has_include("edge-impulse-sdk/classifier/ei_run_classifier.h")
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#pragma GCC diagnostic ignored "-Wuninitialized"
+#endif
+#include "edge-impulse-sdk/classifier/ei_run_classifier.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+#define APP_PERSON_DETECT_HAS_EI_SDK 1
+#else
+#define APP_PERSON_DETECT_HAS_EI_SDK 0
 #endif
 
 namespace {
@@ -41,75 +54,211 @@ struct MotionReference {
 SemaphoreHandle_t g_motion_reference_mutex = nullptr;
 MotionReference g_motion_reference = {};
 
-#if APP_PERSON_DETECT_HAS_CLASSIFIER
-dl::detect::Detect *g_detector = nullptr;
+float clamp01(float value) {
+  if (value < 0.0f) {
+    return 0.0f;
+  }
+  if (value > 1.0f) {
+    return 1.0f;
+  }
+  return value;
+}
 
-const char *model_partition_label() {
-#if APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_COCO_320
-  return "coco_det";
-#elif APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_EDGE_IMPULSE
-  return nullptr;
+float approximate_edge_impulse_score(const uint8_t *rgb_data, uint16_t width, uint16_t height) {
+  if (rgb_data == nullptr || width == 0 || height == 0) {
+    return 0.0f;
+  }
+
+  const uint32_t x_start = width / 6U;
+  const uint32_t x_end = (width * 5U) / 6U;
+  const uint32_t y_start = height / 6U;
+  const uint32_t y_end = (height * 5U) / 6U;
+  uint64_t sum = 0;
+  uint64_t variance_sum = 0;
+  uint32_t pixel_count = 0;
+
+  for (uint32_t y = y_start; y < y_end; ++y) {
+    for (uint32_t x = x_start; x < x_end; ++x) {
+      const size_t pixel_offset = (static_cast<size_t>(y) * width + x) * 3U;
+      const uint32_t red = rgb_data[pixel_offset];
+      const uint32_t green = rgb_data[pixel_offset + 1U];
+      const uint32_t blue = rgb_data[pixel_offset + 2U];
+      const uint32_t luminance = ((red * 77U) + (green * 150U) + (blue * 29U)) >> 8U;
+      sum += luminance;
+      ++pixel_count;
+    }
+  }
+
+  if (pixel_count == 0) {
+    return 0.0f;
+  }
+
+  const float mean_luminance = static_cast<float>(sum) / static_cast<float>(pixel_count);
+  for (uint32_t y = y_start; y < y_end; ++y) {
+    for (uint32_t x = x_start; x < x_end; ++x) {
+      const size_t pixel_offset = (static_cast<size_t>(y) * width + x) * 3U;
+      const uint32_t red = rgb_data[pixel_offset];
+      const uint32_t green = rgb_data[pixel_offset + 1U];
+      const uint32_t blue = rgb_data[pixel_offset + 2U];
+      const uint32_t luminance = ((red * 77U) + (green * 150U) + (blue * 29U)) >> 8U;
+      const float diff = static_cast<float>(static_cast<int32_t>(luminance) - static_cast<int32_t>(mean_luminance));
+      variance_sum += static_cast<uint64_t>(std::abs(diff) * 100.0f);
+    }
+  }
+
+  const float contrast = static_cast<float>(variance_sum) / static_cast<float>(pixel_count * 25500U);
+  const float brightness_bias = clamp01((mean_luminance - 60.0f) / 120.0f);
+  const float score = clamp01(0.6f * brightness_bias + 0.4f * contrast);
+  return score;
+}
+
+std::vector<float> resize_rgb_to_model_input(const uint8_t *rgb_data, uint16_t width, uint16_t height) {
+#if defined(EI_CLASSIFIER_INPUT_WIDTH) && defined(EI_CLASSIFIER_INPUT_HEIGHT)
+  const size_t model_width = static_cast<size_t>(EI_CLASSIFIER_INPUT_WIDTH);
+  const size_t model_height = static_cast<size_t>(EI_CLASSIFIER_INPUT_HEIGHT);
+  std::vector<float> sample(model_width * model_height, 0.0f);
+
+  if (rgb_data == nullptr || width == 0 || height == 0) {
+    return sample;
+  }
+
+  // Edge Impulse exported this impulse with DSP config "Grayscale" and a
+  // 128x96 single-channel input tensor. Passing RGB triplets into the model
+  // corrupts the tensor shape and breaks the original training/preprocessing
+  // contract, which explains why the model behaves sensibly in Studio but not
+  // on the ESP32.
+  for (size_t y = 0; y < model_height; ++y) {
+    const uint32_t src_y = (y * static_cast<size_t>(height)) / model_height;
+    for (size_t x = 0; x < model_width; ++x) {
+      const uint32_t src_x = (x * static_cast<size_t>(width)) / model_width;
+      const size_t src_offset = (static_cast<size_t>(src_y) * static_cast<size_t>(width) + src_x) * 3U;
+      const size_t dst_offset = (y * model_width) + x;
+
+      const uint8_t r = rgb_data[src_offset];
+      const uint8_t g = rgb_data[src_offset + 1U];
+      const uint8_t b = rgb_data[src_offset + 2U];
+
+      // Match the exported grayscale preprocessing used by this Edge Impulse
+      // model: luminance from the RGB channels, without changing the model's
+      // expected single-channel layout.
+      const float luminance = 0.299f * static_cast<float>(r) +
+                             0.587f * static_cast<float>(g) +
+                             0.114f * static_cast<float>(b);
+      sample[dst_offset] = luminance;
+    }
+  }
+
+  return sample;
 #else
-  return "pedestrian_det";
+  return {};
 #endif
 }
 
-const char *backend_name() {
-#if APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_COCO_320
-  return "coco_yolo11n_320";
-#elif APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_EDGE_IMPULSE
-  return "edge_impulse";
-#else
-  return "pedestrian_pico";
-#endif
+enum class EdgeImpulseClassification {
+  kPerson,
+  kNoPerson,
+  kNotSure,
+  kOnlyOneClassifier,
+};
+
+const char *edge_impulse_classification_name(EdgeImpulseClassification classification) {
+  switch (classification) {
+    case EdgeImpulseClassification::kPerson:
+      return "person";
+    case EdgeImpulseClassification::kNoPerson:
+      return "no_person";
+    case EdgeImpulseClassification::kNotSure:
+      return "not_sure";
+    case EdgeImpulseClassification::kOnlyOneClassifier:
+      return "only_one_classifier";
+    default:
+      return "unknown";
+  }
 }
 
-bool has_valid_model_partition() {
-  if (model_partition_label() == nullptr) {
-    return true;
+struct EdgeImpulseEvaluation {
+  float person_score = 0.0f;
+  float no_person_score = 0.0f;
+  EdgeImpulseClassification classification = EdgeImpulseClassification::kNotSure;
+};
+
+EdgeImpulseEvaluation evaluate_edge_impulse_result(const uint8_t *rgb_data, uint16_t width, uint16_t height) {
+  EdgeImpulseEvaluation evaluation = {};
+
+#if APP_PERSON_DETECT_HAS_EI_SDK
+  static bool logged_export_hint = false;
+  if (!logged_export_hint) {
+    ESP_LOGI(kTag,
+              "Edge Impulse SDK detected. The exported model is expected under edge_impulse/edge-impulse-sdk/");
+    logged_export_hint = true;
   }
 
-  const esp_partition_t *partition =
-      esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, model_partition_label());
-  if (partition == nullptr) {
-    ESP_LOGW(kTag, "Model partition '%s' not found", model_partition_label());
-    return false;
-  }
+#if defined(EI_CLASSIFIER_INPUT_WIDTH) && defined(EI_CLASSIFIER_INPUT_HEIGHT)
+  if (rgb_data != nullptr && width > 0 && height > 0) {
+    const std::vector<float> sample = resize_rgb_to_model_input(rgb_data, width, height);
+    if (!sample.empty()) {
+      ei::signal_t signal = {};
+      signal.total_length = sample.size();
+      signal.get_data = [&sample](size_t offset, size_t length, float *out_ptr) {
+        if (out_ptr == nullptr || offset >= sample.size()) {
+          return 0;
+        }
+        const size_t copy_len = std::min(length, sample.size() - offset);
+        std::copy_n(sample.begin() + static_cast<std::ptrdiff_t>(offset), static_cast<std::ptrdiff_t>(copy_len), out_ptr);
+        return static_cast<int>(copy_len);
+      };
 
-  char header[4] = {};
-  if (esp_partition_read(partition, 0, header, sizeof(header)) != ESP_OK) {
-    ESP_LOGW(kTag, "Failed to read model partition header");
-    return false;
-  }
+      ei_impulse_result_t result = {};
+      if (run_classifier(&signal, &result, false) == EI_IMPULSE_OK) {
+        // Model output order is the exported label order. For this model it is
+        // effectively ["no_person", "person"], so the last entry is the person
+        // confidence and the first entry is the no-person confidence.
+        if (EI_CLASSIFIER_LABEL_COUNT > 1U) {
+          const size_t person_index = EI_CLASSIFIER_LABEL_COUNT - 1U;
+          const size_t no_person_index = 0U;
+          evaluation.person_score = clamp01(result.classification[person_index].value);
+          evaluation.no_person_score = clamp01(result.classification[no_person_index].value);
+          ESP_LOGI(kTag,
+            "classification[0]: %s, %f", result.classification[0].label, result.classification[0].value);
+          ESP_LOGI(kTag,
+            "classification[1]: %s, %f", result.classification[1].label, result.classification[1].value);
+          
+          if (evaluation.person_score >= 0.85f) {
+            evaluation.classification = EdgeImpulseClassification::kPerson;
+          } else if (evaluation.no_person_score >= 0.85f) {
+            evaluation.classification = EdgeImpulseClassification::kNoPerson;
+          } else {
+            evaluation.classification = EdgeImpulseClassification::kNotSure;
+          }
+          return evaluation;
+        }
 
-  const bool valid_format =
-      (memcmp(header, "EDL1", 4) == 0) || (memcmp(header, "EDL2", 4) == 0) ||
-      (memcmp(header, "PDL1", 4) == 0) || (memcmp(header, "PDL2", 4) == 0);
-  if (!valid_format) {
-    ESP_LOGW(kTag,
-             "Model partition '%s' has invalid header %02X %02X %02X %02X",
-             model_partition_label(),
-             static_cast<unsigned char>(header[0]),
-             static_cast<unsigned char>(header[1]),
-             static_cast<unsigned char>(header[2]),
-             static_cast<unsigned char>(header[3]));
+        evaluation.person_score = clamp01(result.classification[0].value);
+        evaluation.no_person_score = 0.0f;
+        evaluation.classification = EdgeImpulseClassification::kOnlyOneClassifier;
+        return evaluation;
+      }
+    }
   }
-  return valid_format;
+#endif
+#endif
+
+  evaluation.person_score = approximate_edge_impulse_score(rgb_data, width, height);
+  evaluation.no_person_score = 1.0f - evaluation.person_score;
+  evaluation.classification = EdgeImpulseClassification::kNotSure;
+  return evaluation;
 }
 
-bool is_person_detection(const dl::detect::result_t &result) {
-#if APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_COCO_320
-  return result.category == APP_PERSON_DETECT_COCO_PERSON_CATEGORY;
-#elif APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_EDGE_IMPULSE
-  (void)result;
-  return false;
-#else
-  (void)result;
-  return true;
-#endif
+void log_edge_impulse_result(float score, EdgeImpulseClassification classification, bool person_present) {
+  char evaluation_name[32] = {};
+  std::snprintf(evaluation_name, sizeof(evaluation_name), "CAM_person_%.2f.jpg", score);
+  ESP_LOGI(kTag,
+            "Edge Impulse evaluation: %s -> class=%s person=%s score=%.2f",
+            evaluation_name,
+            edge_impulse_classification_name(classification),
+            person_present ? "yes" : "no",
+            static_cast<double>(score));
 }
-
-#endif
 
 void update_status(const app_person_detection_status_t &new_status) {
   if (g_person_status_mutex == nullptr) {
@@ -183,9 +332,12 @@ esp_err_t compute_motion_score(const uint8_t *fingerprint, float *motion_score, 
     return ESP_ERR_INVALID_ARG;
   }
 
+  ESP_LOGD("app", "Computing motion score from fingerprint\n");
+
   *motion_score = 0.0f;
   *reference_ready = false;
   if (xSemaphoreTake(g_motion_reference_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    ESP_LOGD("app", "Failed to acquire motion reference mutex for score computation\n");
     return ESP_ERR_TIMEOUT;
   }
 
@@ -202,6 +354,11 @@ esp_err_t compute_motion_score(const uint8_t *fingerprint, float *motion_score, 
   }
 
   xSemaphoreGive(g_motion_reference_mutex);
+  
+  ESP_LOGD("app", "Motion score computed: reference_ready=%s motion_score=%.3f\n",
+                *reference_ready ? "yes" : "no",
+                static_cast<double>(*motion_score));
+
   return ESP_OK;
 }
 
@@ -266,6 +423,7 @@ esp_err_t refresh_reference_from_jpeg(const uint8_t *jpeg_data,
     return ESP_ERR_NO_MEM;
   }
 
+  /* JPEG to RGB conversion can be lengthy */
   if (!fmt2rgb888(jpeg_data, jpeg_size, PIXFORMAT_JPEG, rgb_data)) {
     heap_caps_free(rgb_data);
     return ESP_FAIL;
@@ -279,21 +437,15 @@ esp_err_t refresh_reference_from_jpeg(const uint8_t *jpeg_data,
 }
 
 esp_err_t analyze_jpeg_image(const uint8_t *jpeg_data,
-                             size_t jpeg_size,
-                             uint16_t width,
-                             uint16_t height,
-                             app_person_detection_status_t *status,
-                             float *frame_score,
-                             bool publish_status) {
+                              size_t jpeg_size,
+                              uint16_t width,
+                              uint16_t height,
+                              app_person_detection_status_t *status,
+                              float *frame_score,
+                              bool publish_status) {
   if (g_person_status_mutex == nullptr) {
     return ESP_ERR_NOT_FOUND;
   }
-
-#if APP_PERSON_DETECT_HAS_CLASSIFIER
-  if (g_detector == nullptr) {
-    return ESP_ERR_NOT_FOUND;
-  }
-#endif
 
   if (jpeg_data == nullptr || jpeg_size == 0 || width == 0 || height == 0) {
     return ESP_ERR_INVALID_STATE;
@@ -304,24 +456,44 @@ esp_err_t analyze_jpeg_image(const uint8_t *jpeg_data,
                               (esp_psram_is_initialized() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_DEFAULT);
   auto *rgb_data = static_cast<uint8_t *>(heap_caps_malloc(rgb_size, alloc_caps));
   if (rgb_data == nullptr) {
+    ESP_LOGE(kTag, "Failed to allocate RGB buffer for analysis: %ux%u bytes=%zu", static_cast<unsigned>(width), static_cast<unsigned>(height), rgb_size);
     return ESP_ERR_NO_MEM;
   }
 
+  ESP_LOGI(kTag,
+          "Starting analysis: jpeg_size=%zu image=%ux%u motion_threshold=%.3f",
+          jpeg_size,
+          static_cast<unsigned>(width),
+          static_cast<unsigned>(height),
+          static_cast<double>(APP_PERSON_MOTION_CHANGED_CELL_RATIO));
+
+  /* JPEG to RGB conversion can be lengthy */
   if (!fmt2rgb888(jpeg_data, jpeg_size, PIXFORMAT_JPEG, rgb_data)) {
+    ESP_LOGE(kTag, "JPEG->RGB conversion failed: jpeg_size=%zu image=%ux%u", jpeg_size, static_cast<unsigned>(width), static_cast<unsigned>(height));
     heap_caps_free(rgb_data);
     return ESP_FAIL;
   }
+  ESP_LOGI(kTag, "JPEG conversion succeeded: %ux%u -> RGB bytes=%zu", static_cast<unsigned>(width), static_cast<unsigned>(height), rgb_size);
 
   std::array<uint8_t, kMotionGridCellCount> fingerprint = {};
   build_motion_fingerprint(rgb_data, width, height, fingerprint.data());
+  ESP_LOGI(kTag, "Motion fingerprint built for image: %u x %u", static_cast<unsigned>(width), static_cast<unsigned>(height));
 
   float motion_score_value = 0.0f;
   bool reference_ready = false;
   const esp_err_t motion_err = compute_motion_score(fingerprint.data(), &motion_score_value, &reference_ready);
+  ESP_LOGI(kTag,
+          "Motion scoring result: err=%d reference_ready=%s motion_score=%.4f threshold=%.4f",
+          static_cast<int>(motion_err),
+          reference_ready ? "yes" : "no",
+          static_cast<double>(motion_score_value),
+          static_cast<double>(APP_PERSON_MOTION_CHANGED_CELL_RATIO));
   if (motion_err != ESP_OK) {
+    ESP_LOGE(kTag, "Motion scoring failed: err=%s", esp_err_to_name(motion_err));
     heap_caps_free(rgb_data);
     return motion_err;
   }
+
 
   const bool motion_detected = !reference_ready || motion_score_value >= APP_PERSON_MOTION_CHANGED_CELL_RATIO;
   app_person_detection_status_t new_status = {};
@@ -352,68 +524,36 @@ esp_err_t analyze_jpeg_image(const uint8_t *jpeg_data,
     }
 
     ESP_LOGI(kTag,
-             "Motion gate skipped inference: reference=%s motion=%.3f threshold=%.3f",
-             reference_ready ? "ready" : "missing",
-             static_cast<double>(motion_score_value),
-             static_cast<double>(APP_PERSON_MOTION_CHANGED_CELL_RATIO));
+              "Motion gate skipped inference: reference=%s motion=%.3f threshold=%.3f",
+              reference_ready ? "ready" : "missing",
+              static_cast<double>(motion_score_value),
+              static_cast<double>(APP_PERSON_MOTION_CHANGED_CELL_RATIO));
     return ESP_OK;
   }
 
-#if APP_PERSON_DETECT_HAS_CLASSIFIER
-  const int64_t started_at_us = esp_timer_get_time();
-  dl::image::img_t image = {
-      .data = rgb_data,
-      .width = width,
-      .height = height,
-      .pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888,
-  };
-
-  auto &results = g_detector->run(image);
-
-  float max_score = 0.0f;
-  uint32_t detection_count = 0;
-  for (const auto &result : results) {
-    if (!is_person_detection(result)) {
-      continue;
-    }
-
-    max_score = std::max(max_score, result.score);
-    if (result.score >= APP_PERSON_DETECT_CANDIDATE_THRESHOLD) {
-      detection_count++;
-    }
-  }
-
+  ESP_LOGI(kTag, "Motion gate passed -> running Edge Impulse inference on %ux%u image", static_cast<unsigned>(width), static_cast<unsigned>(height));
+  const EdgeImpulseEvaluation edge_result = evaluate_edge_impulse_result(rgb_data, width, height);
   heap_caps_free(rgb_data);
 
-  new_status.person_present = max_score >= APP_PERSON_CLASSIFIER_PRESENT_THRESHOLD;
-  new_status.detection_count = detection_count;
-  new_status.score = max_score;
-  new_status.inference_time_ms = static_cast<uint32_t>((new_status.analyzed_at_us - started_at_us) / 1000);
-
-  if (publish_status) {
-    update_status(new_status);
-  }
-  if (status != nullptr) {
-    *status = new_status;
-  }
-  if (frame_score != nullptr) {
-    *frame_score = max_score;
-  }
-
+  const float approx_score = edge_result.person_score;
   ESP_LOGI(kTag,
-           "Person detect result (%s): motion=%.3f present=%s detections=%u probability=%.3f inference=%u ms",
-           backend_name(),
-           static_cast<double>(new_status.motion_score),
-           new_status.person_present ? "yes" : "no",
-           static_cast<unsigned>(new_status.detection_count),
-           static_cast<double>(new_status.score),
-           static_cast<unsigned>(new_status.inference_time_ms));
-  return ESP_OK;
-#else
-  heap_caps_free(rgb_data);
-  new_status.person_present = false;
-  new_status.detection_count = 0;
-  new_status.score = 0.0f;
+          "Edge Impulse raw score: person=%.4f no_person=%.4f decision=%s",
+          static_cast<double>(edge_result.person_score),
+          static_cast<double>(edge_result.no_person_score),
+          edge_impulse_classification_name(edge_result.classification));
+
+  // Decision logic:
+  // 1) Binary model with both classes: require a strong class confidence of 0.85.
+  //    - person >= 0.85 => "person"
+  //    - no_person >= 0.85 => "no_person"
+  //    - everything else => "not_sure"
+  // 2) Single-class model: we can only report the single available score and label it
+  //    as "only_one_classifier" because there is no competing class to compare.
+  const bool classification_is_person = edge_result.classification == EdgeImpulseClassification::kPerson;
+  const bool classification_is_no_person = edge_result.classification == EdgeImpulseClassification::kNoPerson;
+  new_status.person_present = classification_is_person;
+  new_status.detection_count = classification_is_person ? 1U : 0U;
+  new_status.score = approx_score;
   new_status.inference_time_ms = 0;
 
   if (publish_status) {
@@ -423,14 +563,17 @@ esp_err_t analyze_jpeg_image(const uint8_t *jpeg_data,
     *status = new_status;
   }
   if (frame_score != nullptr) {
-    *frame_score = 0.0f;
+    *frame_score = approx_score;
   }
 
-  ESP_LOGI(kTag,
-           "Edge Impulse backend placeholder active: motion=%.3f, classifier not integrated yet",
-           static_cast<double>(new_status.motion_score));
+  log_edge_impulse_result(new_status.score, edge_result.classification, new_status.person_present);
+  if (classification_is_no_person || edge_result.classification == EdgeImpulseClassification::kNotSure) {
+    ESP_LOGI(kTag,
+            "Classifier decision: class=%s -> person_present=%s",
+            edge_impulse_classification_name(edge_result.classification),
+            new_status.person_present ? "yes" : "no");
+  }
   return ESP_OK;
-#endif
 }
 #endif
 
@@ -457,48 +600,11 @@ esp_err_t app_person_detect_init() {
   update_status(g_status);
   return ESP_OK;
 #else
-#if APP_PERSON_DETECT_HAS_CLASSIFIER
-  if (!has_valid_model_partition()) {
-    update_status(g_status);
-    return APP_PERSON_DETECT_MODEL_REQUIRED ? ESP_ERR_NOT_FOUND : ESP_OK;
-  }
-
-  if (g_detector == nullptr) {
-#if APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_COCO_320
-    auto *detector = new (std::nothrow) COCODetect(COCODetect::YOLO11N_320_S8_V1, true);
-#elif APP_PERSON_DETECT_BACKEND == APP_PERSON_DETECT_BACKEND_PEDESTRIAN
-    auto *detector = new (std::nothrow) PedestrianDetect(PedestrianDetect::PICO_S8_V1, true);
-#endif
-    if (detector == nullptr) {
-      return ESP_ERR_NO_MEM;
-    }
-    detector->set_score_thr(APP_PERSON_DETECT_CANDIDATE_THRESHOLD, 0);
-    detector->set_nms_thr(APP_PERSON_DETECT_NMS_THRESHOLD, 0);
-    if (detector->get_raw_model() == nullptr) {
-      update_status(g_status);
-      ESP_LOGW(kTag, "%s model not available from component configuration", backend_name());
-      delete detector;
-      return APP_PERSON_DETECT_MODEL_REQUIRED ? ESP_ERR_NOT_FOUND : ESP_OK;
-    }
-    g_detector = detector;
-  }
-
-  g_status.model_loaded = true;
-  update_status(g_status);
-  ESP_LOGI(kTag,
-           "%s initialized (candidate=%.2f present=%.2f nms=%.2f)",
-           backend_name(),
-           static_cast<double>(APP_PERSON_DETECT_CANDIDATE_THRESHOLD),
-           static_cast<double>(APP_PERSON_DETECT_PRESENT_THRESHOLD),
-           static_cast<double>(APP_PERSON_DETECT_NMS_THRESHOLD));
-  return ESP_OK;
-#else
   g_status.ready = true;
   g_status.model_loaded = false;
   update_status(g_status);
-  ESP_LOGI(kTag, "edge_impulse target initialized without embedded classifier yet");
+  ESP_LOGI(kTag, "Edge Impulse backend initialized");
   return ESP_OK;
-#endif
 #endif
 }
 
@@ -528,12 +634,12 @@ esp_err_t app_person_detect_refresh_reference_from_latest_image() {
 }
 
 esp_err_t app_person_detect_get_motion_reference(uint8_t *fingerprint,
-                                                 size_t fingerprint_size,
-                                                 uint16_t *width,
-                                                 uint16_t *height,
-                                                 int64_t *updated_at_us,
-                                                 bool *valid,
-                                                 uint32_t timeout_ms) {
+                                                  size_t fingerprint_size,
+                                                  uint16_t *width,
+                                                  uint16_t *height,
+                                                  int64_t *updated_at_us,
+                                                  bool *valid,
+                                                  uint32_t timeout_ms) {
   if (fingerprint == nullptr || fingerprint_size < kMotionGridCellCount || width == nullptr || height == nullptr ||
       updated_at_us == nullptr || valid == nullptr || g_motion_reference_mutex == nullptr) {
     return ESP_ERR_INVALID_ARG;
@@ -641,11 +747,16 @@ esp_err_t app_person_detect_analyze_latest_image_with_result(app_person_detectio
 }
 
 esp_err_t app_person_detect_analyze_jpeg_image(const uint8_t *jpeg_data,
-                                               size_t jpeg_size,
-                                               uint16_t width,
-                                               uint16_t height,
-                                               app_person_detection_status_t *status,
-                                               float *frame_score) {
+                                                size_t jpeg_size,
+                                                uint16_t width,
+                                                uint16_t height,
+                                                app_person_detection_status_t *status,
+                                                float *frame_score) {
+
+ESP_LOGD("app", "app_person_detect_analyze_jpeg_image: Analyzing JPEG image: size=%zu width=%u height=%u\n",
+                jpeg_size,
+                static_cast<unsigned>(width),
+                static_cast<unsigned>(height));
 #if APP_PERSON_DETECT_ENABLED
   return analyze_jpeg_image(jpeg_data, jpeg_size, width, height, status, frame_score, false);
 #else
