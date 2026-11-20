@@ -114,7 +114,12 @@ def requested_capture_name(headers) -> str | None:
         if not normalized or normalized in {".", ".."}:
             continue
         lowered = normalized.lower()
-        if "_person_" not in lowered and "_no_person_" not in lowered:
+        has_known_label = (
+            "_person_" in lowered
+            or "_no_person_" in lowered
+            or "_unsure_" in lowered
+        )
+        if not has_known_label:
             continue
         if not lowered.endswith(".jpg"):
             normalized = f"{normalized}.jpg"

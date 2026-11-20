@@ -154,14 +154,14 @@ esp_err_t root_get_handler(httpd_req_t *req) {
       }
 
       async function refreshIrState() {
-        const res = await fetch('/ir');
+        const res = await fetch(`/ir?t=${Date.now()}`, { cache: 'no-store' });
         const data = await res.json();
         irEnabled = !!data.enabled;
         renderIrState();
       }
 
       async function setIrState(enabled) {
-        const res = await fetch(`/ir?enabled=${enabled ? 1 : 0}`);
+        const res = await fetch(`/ir?enabled=${enabled ? 1 : 0}&t=${Date.now()}`, { cache: 'no-store' });
         const data = await res.json();
         irEnabled = !!data.enabled;
         renderIrState();
@@ -363,6 +363,9 @@ esp_err_t ir_get_handler(httpd_req_t *req) {
 
   char payload[64] = {};
   std::snprintf(payload, sizeof(payload), "{\"enabled\":%s}", enabled ? "true" : "false");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  httpd_resp_set_hdr(req, "Pragma", "no-cache");
+  httpd_resp_set_hdr(req, "Expires", "0");
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, payload, HTTPD_RESP_USE_STRLEN);
 }

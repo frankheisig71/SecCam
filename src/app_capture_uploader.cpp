@@ -124,7 +124,7 @@ void set_capture_file_name(QueuedCaptureUpload *capture,
     if (score >= unsure_min_thresh) {
       std::snprintf(capture->file_name,
                     sizeof(capture->file_name),
-                    "CAM_unsure+%.2f.jpg",
+                    "CAM_unsure_%.2f.jpg",
                     static_cast<double>(score));
       return;
     }
@@ -280,6 +280,16 @@ esp_err_t upload_capture_once(const QueuedCaptureUpload &capture) {
 
 void analysis_task(void *) {
   ESP_LOGD("app", "Analysis task started\n");
+  const TickType_t analysis_idle_ticks = pdMS_TO_TICKS(APP_DATASET_COLLECTOR_ANALYSIS_IDLE_MS);
+
+  auto apply_analysis_idle_delay = [analysis_idle_ticks]() {
+    if (analysis_idle_ticks > 0) {
+      vTaskDelay(analysis_idle_ticks);
+    } else {
+      taskYIELD();
+    }
+  };
+
   while (true) {
     QueuedCaptureAnalysis analysis = {};
     if (xQueueReceive(g_analysis_queue, &analysis, portMAX_DELAY) != pdTRUE) {
@@ -326,6 +336,7 @@ void analysis_task(void *) {
                esp_err_to_name(analysis_err));
       free_queued_capture_analysis(&analysis);
       g_analysis_in_progress.store(false, std::memory_order_release);
+      apply_analysis_idle_delay();
       continue;
     }
 
@@ -389,6 +400,7 @@ void analysis_task(void *) {
       }
       free_queued_capture_analysis(&analysis);
       g_analysis_in_progress.store(false, std::memory_order_release);
+      apply_analysis_idle_delay();
       continue;
     }
 
@@ -415,6 +427,7 @@ void analysis_task(void *) {
 
     free_queued_capture_analysis(&analysis);
     g_analysis_in_progress.store(false, std::memory_order_release);
+    apply_analysis_idle_delay();
 #else
     QueuedCaptureUpload upload = {};
     upload.image_data = analysis.image_data;
@@ -440,6 +453,7 @@ void analysis_task(void *) {
                static_cast<unsigned>(upload.sequence_size));
       free_queued_capture(&upload);
       g_analysis_in_progress.store(false, std::memory_order_release);
+      apply_analysis_idle_delay();
       continue;
     }
 
@@ -455,6 +469,7 @@ void analysis_task(void *) {
 
     free_queued_capture_analysis(&analysis);
     g_analysis_in_progress.store(false, std::memory_order_release);
+    apply_analysis_idle_delay();
 #endif
   }
 }
@@ -556,12 +571,13 @@ esp_err_t app_capture_uploader_init(esp_pm_lock_handle_t cpu_max_lock) {
   }
 
   if (g_analysis_task == nullptr) {
-    const BaseType_t task_ok = xTaskCreate(analysis_task,
-                                           "capture_analysis",
-                                           APP_DATASET_COLLECTOR_UPLOAD_TASK_STACK_SIZE,
-                                           nullptr,
-                                           APP_DATASET_COLLECTOR_UPLOAD_TASK_PRIORITY,
-                                           &g_analysis_task);
+    const BaseType_t task_ok = xTaskCreatePinnedToCore(analysis_task,
+                                                       "capture_analysis",
+                                                       APP_DATASET_COLLECTOR_UPLOAD_TASK_STACK_SIZE,
+                                                       nullptr,
+                                                       APP_DATASET_COLLECTOR_UPLOAD_TASK_PRIORITY,
+                                                       &g_analysis_task,
+                                                       0);
     if (task_ok != pdPASS) {
       vQueueDelete(g_analysis_queue);
       g_analysis_queue = nullptr;
@@ -660,6 +676,77 @@ esp_err_t app_capture_uploader_enqueue_analysis_image(const char *capture_reason
 
   ESP_LOGI(kTag,
            "Queued image for analysis: mode=%s reason=%s size=%u seq=%u/%u",
+           motion_capture ? "motion" : "idle",
+           analysis.capture_reason,
+           static_cast<unsigned>(analysis.image_size),
+           static_cast<unsigned>(analysis.sequence_index),
+           static_cast<unsigned>(analysis.sequence_size));
+  return ESP_OK;
+}
+
+esp_err_t app_capture_uploader_enqueue_analysis_buffer(const uint8_t *image_data,
+                                                       size_t image_size,
+                                                       int64_t captured_at_us,
+                                                       uint16_t width,
+                                                       uint16_t height,
+                                                       const char *capture_reason,
+                                                       bool motion_capture,
+                                                       uint32_t sequence_index,
+                                                       uint32_t sequence_size) {
+  if (g_analysis_queue == nullptr) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  if (image_data == nullptr || image_size == 0 || width == 0 || height == 0) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  const UBaseType_t pending_analysis_count = uxQueueMessagesWaiting(g_analysis_queue);
+  const UBaseType_t in_flight_count = pending_analysis_count +
+                                      (g_analysis_in_progress.load(std::memory_order_acquire) ? 1U : 0U);
+  if (in_flight_count >= APP_DATASET_COLLECTOR_ANALYSIS_QUEUE_DEPTH) {
+    ESP_LOGW(kTag,
+             "Skipping queued analysis because the analysis queue is already full: reason=%s seq=%u/%u backlog=%u limit=%u",
+             capture_reason != nullptr ? capture_reason : "unknown",
+             static_cast<unsigned>(sequence_index),
+             static_cast<unsigned>(sequence_size),
+             static_cast<unsigned>(in_flight_count),
+             static_cast<unsigned>(APP_DATASET_COLLECTOR_ANALYSIS_QUEUE_DEPTH));
+    g_analysis_queue_backpressure_active.store(true, std::memory_order_release);
+    return ESP_ERR_TIMEOUT;
+  }
+
+  QueuedCaptureAnalysis analysis = {};
+  const uint32_t alloc_caps = MALLOC_CAP_8BIT | (esp_psram_is_initialized() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_DEFAULT);
+  analysis.image_data = static_cast<uint8_t *>(heap_caps_malloc(image_size, alloc_caps));
+  if (analysis.image_data == nullptr) {
+    return ESP_ERR_NO_MEM;
+  }
+
+  std::memcpy(analysis.image_data, image_data, image_size);
+  analysis.image_size = image_size;
+  analysis.captured_at_us = captured_at_us;
+  analysis.width = width;
+  analysis.height = height;
+  std::snprintf(analysis.capture_reason,
+                sizeof(analysis.capture_reason),
+                "%s",
+                capture_reason != nullptr ? capture_reason : "unknown");
+  analysis.motion_capture = motion_capture;
+  analysis.sequence_index = sequence_index;
+  analysis.sequence_size = sequence_size;
+
+  if (xQueueSend(g_analysis_queue, &analysis, pdMS_TO_TICKS(APP_DATASET_COLLECTOR_UPLOAD_QUEUE_TIMEOUT_MS)) != pdTRUE) {
+    ESP_LOGW(kTag,
+             "Analysis queue full, dropping buffered capture for classification: reason=%s seq=%u/%u",
+             analysis.capture_reason,
+             static_cast<unsigned>(analysis.sequence_index),
+             static_cast<unsigned>(analysis.sequence_size));
+    free_queued_capture_analysis(&analysis);
+    return ESP_ERR_TIMEOUT;
+  }
+
+  ESP_LOGI(kTag,
+           "Queued buffered image for analysis: mode=%s reason=%s size=%u seq=%u/%u",
            motion_capture ? "motion" : "idle",
            analysis.capture_reason,
            static_cast<unsigned>(analysis.image_size),

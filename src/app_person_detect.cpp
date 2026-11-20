@@ -292,7 +292,7 @@ void log_edge_impulse_result(float score, EdgeImpulseClassification classificati
   } else if (score >= APP_PERSON_SCORE_UNSURE_MIN) {
     std::snprintf(evaluation_name,
                   sizeof(evaluation_name),
-                  "CAM_unsure+%.2f.jpg",
+                  "CAM_unsure_%.2f.jpg",
                   static_cast<double>(score));
   } else {
     std::snprintf(evaluation_name,

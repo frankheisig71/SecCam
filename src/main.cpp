@@ -30,7 +30,6 @@ TickType_t g_last_reference_capture_tick = 0;
 #if APP_DATASET_COLLECTOR_ENABLED
 TickType_t g_last_idle_dataset_capture_tick = 0;
 TickType_t g_motion_dataset_guard_until_tick = 0;
-TickType_t g_motion_dataset_burst_guard_until_tick = 0;
 uint32_t g_motion_dataset_sequence_count = 0;
 #endif
 
@@ -392,6 +391,11 @@ esp_err_t perform_dataset_capture_and_upload(const char *reason,
 }
 
 esp_err_t perform_motion_dataset_batch_capture() {
+  struct MotionBatchSavedCapture {
+    BufferedCaptureImage image = {};
+    uint32_t sequence_index = 1;
+  };
+
   const uint32_t remaining_motion_captures =
       APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES > g_motion_dataset_sequence_count
           ? APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES - g_motion_dataset_sequence_count
@@ -408,6 +412,8 @@ esp_err_t perform_motion_dataset_batch_capture() {
   const uint32_t kSkipFrameCount = APP_CAPTURE_IR_LED_SKIP_FRAMES_COUNT;
   const uint32_t kSaveCycles = APP_CAPTURE_TRIGGER_IR_SAVE_CYCLES;
   const uint32_t batch_capture_count = std::min<uint32_t>(kSaveCycles, remaining_motion_captures);
+  MotionBatchSavedCapture saved_captures[APP_CAPTURE_TRIGGER_IR_SAVE_CYCLES] = {};
+  uint32_t saved_capture_count = 0;
   esp_err_t batch_err = ESP_OK;
   esp_err_t capture_err = ESP_OK;
 
@@ -451,13 +457,21 @@ esp_err_t perform_motion_dataset_batch_capture() {
         continue;
       }
 
-      batch_err = app_capture_uploader_enqueue_analysis_image("motion",
-                                                             true,
-                                                             sequence_index,
-                                                             APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES);
-      if (batch_err != ESP_OK) {
+      if (saved_capture_count >= APP_CAPTURE_TRIGGER_IR_SAVE_CYCLES) {
+        batch_err = ESP_ERR_NO_MEM;
         break;
       }
+
+      BufferedCaptureImage captured_image = {};
+      const esp_err_t copy_err = copy_latest_into_buffer(&captured_image);
+      if (copy_err != ESP_OK) {
+        batch_err = copy_err;
+        break;
+      }
+
+      saved_captures[saved_capture_count].image = captured_image;
+      saved_captures[saved_capture_count].sequence_index = sequence_index;
+      saved_capture_count++;
 
       g_motion_dataset_sequence_count = sequence_index;
       ESP_LOGI(kTag, "Motion cycle %d saved image seq=%u/%u", 
@@ -475,11 +489,44 @@ esp_err_t perform_motion_dataset_batch_capture() {
   app_ir_led_set_enabled(false);
   ESP_LOGI(kTag, "IR-LED disabled after motion capture batch");
 
+  if (batch_err == ESP_OK && saved_capture_count == batch_capture_count) {
+    for (uint32_t index = 0; index < saved_capture_count; ++index) {
+      MotionBatchSavedCapture &saved = saved_captures[index];
+      batch_err = app_capture_uploader_enqueue_analysis_buffer(saved.image.data,
+                                                               saved.image.size,
+                                                               saved.image.captured_at_us,
+                                                               saved.image.width,
+                                                               saved.image.height,
+                                                               "motion",
+                                                               true,
+                                                               saved.sequence_index,
+                                                               APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES);
+      if (batch_err != ESP_OK) {
+        ESP_LOGW(kTag,
+                 "Failed to queue buffered motion capture for analysis: seq=%u/%u err=%s",
+                 static_cast<unsigned>(saved.sequence_index),
+                 static_cast<unsigned>(APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES),
+                 esp_err_to_name(batch_err));
+        break;
+      }
+    }
+  } else if (saved_capture_count > 0) {
+    ESP_LOGW(kTag,
+             "Dropping %u buffered motion captures because batch did not complete cleanly",
+             static_cast<unsigned>(saved_capture_count));
+  }
+
+  for (uint32_t index = 0; index < saved_capture_count; ++index) {
+    free_buffered_capture_image(&saved_captures[index].image);
+  }
+
   const TickType_t guard_start_tick = xTaskGetTickCount();
   g_motion_dataset_guard_until_tick = guard_start_tick + pdMS_TO_TICKS(APP_DATASET_COLLECTOR_MOTION_GUARD_MS);
   if (g_motion_dataset_sequence_count >= APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES) {
     g_motion_dataset_sequence_count = 0;
-    g_motion_dataset_burst_guard_until_tick = 0;
+    ESP_LOGI(kTag,
+             "Motion burst completed; triggers disabled for guard-time %u ms",
+             static_cast<unsigned>(APP_DATASET_COLLECTOR_MOTION_GUARD_MS));
   }
 
   return batch_err;
@@ -488,7 +535,7 @@ esp_err_t perform_motion_dataset_batch_capture() {
 
 bool should_pause_camera_activity() {
   return app_http_server_is_transmitting_image() ||
-         (APP_WIFI_MODE == APP_WIFI_MODE_STA && app_wifi_sta_is_busy());
+          (APP_WIFI_MODE == APP_WIFI_MODE_STA && app_wifi_sta_is_busy());
 }
 
 esp_err_t configure_power_management() {
@@ -660,24 +707,30 @@ void capture_supervisor_task(void *) {
   TickType_t last_motion_tick = xTaskGetTickCount();
   g_last_idle_dataset_capture_tick = xTaskGetTickCount();
   bool motion_trigger_armed = (last_gpio_level == 0);
-  app_ir_led_set_enabled(last_gpio_level != 0);
+  TickType_t pir_low_since_tick = (last_gpio_level == 0) ? last_motion_tick : 0;
+  app_ir_led_set_enabled(false);
 
   while (true) {
     const TickType_t now = xTaskGetTickCount();
     const int current_gpio_level = gpio_get_level(APP_CAPTURE_TRIGGER_GPIO);
-    app_ir_led_set_enabled(current_gpio_level != 0);
+    app_ir_led_set_enabled(false);
 
     if (current_gpio_level != 0) {
       last_motion_tick = now;
+      pir_low_since_tick = 0;
+    } else {
+      if (pir_low_since_tick == 0) {
+        pir_low_since_tick = now;
+      }
+      if (!motion_trigger_armed &&
+          (now - pir_low_since_tick) >= pdMS_TO_TICKS(APP_PIR_REARM_LOW_MS)) {
+        motion_trigger_armed = true;
+      }
     }
 #if APP_DATASET_COLLECTOR_ENABLED
     if (current_gpio_level == 0 && g_motion_dataset_sequence_count > 0 &&
         (now - last_motion_tick) >= pdMS_TO_TICKS(APP_DATASET_COLLECTOR_MOTION_GUARD_MS)) {
       g_motion_dataset_sequence_count = 0;
-    }
-
-    if (current_gpio_level == 0) {
-      motion_trigger_armed = true;
     }
 
     bool should_refresh_reference_dataset = false;
@@ -697,7 +750,6 @@ void capture_supervisor_task(void *) {
     bool should_collect_motion = false;
     bool should_collect_idle = false;
     if (current_gpio_level != 0 && motion_trigger_armed &&
-        now >= g_motion_dataset_burst_guard_until_tick &&
         now >= g_motion_dataset_guard_until_tick &&
         !app_capture_uploader_should_pause_motion_capture() &&
         g_motion_dataset_sequence_count < APP_DATASET_COLLECTOR_MAX_MOTION_CAPTURES) {
@@ -709,12 +761,15 @@ void capture_supervisor_task(void *) {
                  static_cast<unsigned>(APP_PIR_DEBOUNCE_ACTIVE_PERCENT));
       }
     }
-    if (current_gpio_level == 0 && now >= g_last_idle_dataset_capture_tick + pdMS_TO_TICKS(APP_DATASET_COLLECTOR_IDLE_INTERVAL_MS)) {
+    if (APP_DATASET_COLLECTOR_IDLE_INTERVAL_MS > 0 &&
+        current_gpio_level == 0 &&
+        now >= g_last_idle_dataset_capture_tick + pdMS_TO_TICKS(APP_DATASET_COLLECTOR_IDLE_INTERVAL_MS)) {
       should_collect_idle = true;
     }
 
     if (should_collect_motion) {
       motion_trigger_armed = false;
+      ESP_LOGI(kTag, "PIR trigger accepted (debounced); starting motion capture batch");
       const esp_err_t capture_err = perform_motion_dataset_batch_capture();
       if (capture_err != ESP_OK) {
         ESP_LOGW(kTag, "Dataset motion capture failed: %s", esp_err_to_name(capture_err));
