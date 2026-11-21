@@ -154,27 +154,27 @@ esp_err_t root_get_handler(httpd_req_t *req) {
       }
 
       async function refreshIrState() {
-        const res = await fetch(`/ir?t=${Date.now()}`, { cache: 'no-store' });
+        const res = await fetch(`ir?t=${Date.now()}`, { cache: 'no-store' });
         const data = await res.json();
         irEnabled = !!data.enabled;
         renderIrState();
       }
 
       async function setIrState(enabled) {
-        const res = await fetch(`/ir?enabled=${enabled ? 1 : 0}&t=${Date.now()}`, { cache: 'no-store' });
+        const res = await fetch(`ir?enabled=${enabled ? 1 : 0}&t=${Date.now()}`, { cache: 'no-store' });
         const data = await res.json();
         irEnabled = !!data.enabled;
         renderIrState();
       }
 
       function refreshFrame() {
-        frame.src = `/image.jpg?t=${Date.now()}`;
+        frame.src = `image.jpg?t=${Date.now()}`;
       }
 
       button.addEventListener('click', () => setIrState(!irEnabled));
       refreshFrame();
       refreshIrState();
-      setInterval(refreshFrame, 500);
+      setInterval(refreshFrame, 1000);
     </script>
   </body>
 </html>

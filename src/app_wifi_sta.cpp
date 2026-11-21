@@ -221,6 +221,13 @@ esp_err_t ensure_wifi_stack() {
     return ESP_FAIL;
   }
 
+  const esp_err_t hostname_err = esp_netif_set_hostname(g_sta_netif, APP_WIFI_HOSTNAME);
+  if (hostname_err != ESP_OK) {
+    ESP_LOGW(kTag, "Set hostname failed: %s", esp_err_to_name(hostname_err));
+  } else {
+    ESP_LOGI(kTag, "STA hostname: %s", APP_WIFI_HOSTNAME);
+  }
+
   wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
   ESP_RETURN_ON_ERROR(esp_wifi_init(&init_config), kTag, "esp_wifi_init failed");
 
@@ -248,10 +255,40 @@ esp_err_t ensure_wifi_stack() {
   return ESP_OK;
 }
 
+esp_err_t configure_static_ip() {
+#if APP_WIFI_STA_STATIC_IP_ENABLED
+  if (g_sta_netif == nullptr) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  const esp_err_t dhcp_stop_err = esp_netif_dhcpc_stop(g_sta_netif);
+  if (dhcp_stop_err != ESP_OK && dhcp_stop_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+    ESP_LOGE(kTag, "Stop DHCP client failed: %s", esp_err_to_name(dhcp_stop_err));
+    return dhcp_stop_err;
+  }
+
+  esp_netif_ip_info_t ip_info = {};
+  if (!esp_netif_str_to_ip4(APP_WIFI_STA_STATIC_IP, &ip_info.ip) ||
+      !esp_netif_str_to_ip4(APP_WIFI_STA_STATIC_GATEWAY, &ip_info.gw) ||
+      !esp_netif_str_to_ip4(APP_WIFI_STA_STATIC_NETMASK, &ip_info.netmask)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  ESP_RETURN_ON_ERROR(esp_netif_set_ip_info(g_sta_netif, &ip_info), kTag, "Set static IP failed");
+  ESP_LOGI(kTag,
+           "Using static IP %s, gateway %s, netmask %s",
+           APP_WIFI_STA_STATIC_IP,
+           APP_WIFI_STA_STATIC_GATEWAY,
+           APP_WIFI_STA_STATIC_NETMASK);
+#endif
+  return ESP_OK;
+}
+
 }  // namespace
 
 esp_err_t app_wifi_sta_start() {
   ESP_RETURN_ON_ERROR(ensure_wifi_stack(), kTag, "WiFi stack init failed");
+  ESP_RETURN_ON_ERROR(configure_static_ip(), kTag, "Configure static IP failed");
 
   wifi_config_t wifi_config = {};
   std::memcpy(wifi_config.sta.ssid, APP_WIFI_STA_SSID, sizeof(APP_WIFI_STA_SSID) - 1);

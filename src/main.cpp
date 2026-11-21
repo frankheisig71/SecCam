@@ -67,7 +67,7 @@ bool is_pir_trigger_stable_active() {
   return (active_samples * 100U) >= (sample_count * APP_PIR_DEBOUNCE_ACTIVE_PERCENT);
 }
 
-#if APP_WIFI_IS_AP
+#if APP_SETUP
 void setup_preview_task(void *) {
   while (true) {
     if (!app_http_server_is_transmitting_image()) {

@@ -82,6 +82,20 @@
 #define APP_WIFI_AP_IP_ADDR "192.168.4.1"
 #endif
 
+// Optional: feste LAN-Adresse für stationäre Geräte.
+#ifndef APP_WIFI_STA_STATIC_IP_ENABLED
+#define APP_WIFI_STA_STATIC_IP_ENABLED 0
+#endif
+#ifndef APP_WIFI_STA_STATIC_IP
+#define APP_WIFI_STA_STATIC_IP "192.168.178.200"
+#endif
+#ifndef APP_WIFI_STA_STATIC_GATEWAY
+#define APP_WIFI_STA_STATIC_GATEWAY "192.168.178.1"
+#endif
+#ifndef APP_WIFI_STA_STATIC_NETMASK
+#define APP_WIFI_STA_STATIC_NETMASK "255.255.255.0"
+#endif
+
 // Setup mode keeps only AP preview capture and the IR toggle UI.
 #ifndef APP_SETUP
 #define APP_SETUP 0
@@ -90,7 +104,7 @@
 #define APP_CAPTURE 0
 #endif
 #ifndef APP_SETUP_PREVIEW_INTERVAL_MS
-#define APP_SETUP_PREVIEW_INTERVAL_MS 500
+#define APP_SETUP_PREVIEW_INTERVAL_MS 1000
 #endif
 
 // ----------------------- Capture & Triggering ------------------------------
